@@ -1,6 +1,25 @@
 import { describe, expectTypeOf, it } from 'vitest';
 
-import type { Company, Page, PagePromise, Posting, PostingDetail, RecordsPage, Run, Scraper, ScraperDetail, Usage } from '../src';
+import { parseWebhook, verifyWebhook } from '../src';
+import type {
+  Company,
+  Page,
+  PagePromise,
+  Posting,
+  PostingDetail,
+  RecordsPage,
+  Run,
+  Scraper,
+  ScraperDetail,
+  Usage,
+  WebhookDelivery,
+  WebhookEndpoint,
+  WebhookEndpointList,
+  WebhookEndpointWithSecret,
+  WebhookEvent,
+  WebhookEventName,
+  WebhookSecret,
+} from '../src';
 import { makeClient, mockFetch } from './helpers';
 
 interface Job {
@@ -55,6 +74,28 @@ describe('types', () => {
     const scrape = () => client.scrape<Job, BoardInput>('ats.board', { board_url: 'https://example.com' });
     expectTypeOf<Awaited<ReturnType<typeof scrape>>['run']>().toEqualTypeOf<Run<BoardInput>>();
     expectTypeOf<Awaited<ReturnType<typeof scrape>>['records']>().toEqualTypeOf<PagePromise<Job, RecordsPage<Job>>>();
+  }));
+
+  it('webhooks return the API shapes', checked(() => {
+    expectTypeOf(client.webhooks.list()).resolves.toEqualTypeOf<WebhookEndpointList>();
+    expectTypeOf(client.webhooks.create({ url: 'https://example.com', events: ['run.failed'] })).resolves.toEqualTypeOf<WebhookEndpointWithSecret>();
+    expectTypeOf(client.webhooks.get('whk_1')).resolves.toEqualTypeOf<WebhookEndpoint>();
+    expectTypeOf(client.webhooks.update('whk_1', { enabled: false })).resolves.toEqualTypeOf<WebhookEndpoint>();
+    expectTypeOf(client.webhooks.delete('whk_1')).resolves.toEqualTypeOf<void>();
+    expectTypeOf(client.webhooks.rotateSecret('whk_1')).resolves.toEqualTypeOf<WebhookEndpointWithSecret>();
+    expectTypeOf(client.webhooks.createRunSecret()).resolves.toEqualTypeOf<WebhookSecret>();
+    expectTypeOf(client.webhooks.deliveries.list()).toEqualTypeOf<PagePromise<WebhookDelivery>>();
+    expectTypeOf(client.webhooks.deliveries.resend('whd_1')).resolves.toEqualTypeOf<WebhookDelivery>();
+    // @ts-expect-error an event that does not exist
+    void client.webhooks.create({ url: 'https://example.com', events: ['run.started'] });
+  }));
+
+  it('verifying a webhook is synchronous, and the event carries the run', checked(() => {
+    expectTypeOf(verifyWebhook('whsec', '1700000000', new Uint8Array(), 'v1=00')).toEqualTypeOf<boolean>();
+    expectTypeOf(verifyWebhook('whsec', undefined, 'text', undefined, { toleranceSeconds: 60 })).toEqualTypeOf<boolean>();
+    expectTypeOf(parseWebhook('whsec', '1700000000', new ArrayBuffer(0), 'v1=00')).toEqualTypeOf<WebhookEvent>();
+    expectTypeOf(parseWebhook<BoardInput>('whsec', 1700000000, '', 'v1=00').data.run).toEqualTypeOf<Run<BoardInput>>();
+    expectTypeOf<WebhookEvent['type']>().toEqualTypeOf<WebhookEventName>();
   }));
 
   it('records are JSON objects unless told otherwise', checked(() => {

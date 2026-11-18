@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { APIConnectionError, APIConnectionTimeoutError, RateLimitError, ServerError } from '../src';
+import { APIConnectionError, APIConnectionTimeoutError, ConflictError, RateLimitError, ServerError } from '../src';
 import { apiError, hang, json, makeClient, makeRun, mockFetch } from './helpers';
 
 beforeEach(() => {
@@ -166,25 +166,36 @@ describe('retries of a request that is safe to repeat', () => {
   });
 });
 
-describe('starting a run is not repeated blindly', () => {
-  it('is not sent again after a 500: the run may exist', async () => {
-    const mock = mockFetch(broken());
-    const { error } = await settle(makeClient(mock.fetch).scrapers.run('ats.board', {}));
-    expect(error).toBeInstanceOf(ServerError);
-    expect(mock.calls).toHaveLength(1);
+describe('starting a run is safe to repeat', () => {
+  const keyOf = (call: { headers: Record<string, string> }): string | undefined =>
+    Object.entries(call.headers).find(([name]) => name.toLowerCase() === 'idempotency-key')?.[1];
+
+  it('is sent again after a 500, a failed connection and a timeout, with the same idempotency key', async () => {
+    const mock = mockFetch(broken(), new TypeError('fetch failed'), json(makeRun('queued'), 202));
+    const { value } = await settle(makeClient(mock.fetch).scrapers.run('ats.board', {}));
+    expect(value).toMatchObject({ status: 'queued' });
+    const keys = mock.calls.map(keyOf);
+    expect(keys).toHaveLength(3);
+    expect(keys[0]).toMatch(/^[0-9a-f-]{32,36}$/);
+    expect(new Set(keys).size).toBe(1);
   });
 
-  it('is not sent again after a failed connection', async () => {
-    const mock = mockFetch(new TypeError('fetch failed'));
-    const { error } = await settle(makeClient(mock.fetch).scrapers.run('ats.board', {}));
-    expect(error).toBeInstanceOf(APIConnectionError);
-    expect(mock.calls).toHaveLength(1);
+  it('gives each call its own key, unless one is given', async () => {
+    const mock = mockFetch(json(makeRun('queued'), 202), json(makeRun('queued'), 202), json(makeRun('ok')));
+    const client = makeClient(mock.fetch);
+    await settle(client.scrapers.run('ats.board', {}));
+    await settle(client.scrapers.run('ats.board', {}));
+    await settle(client.scrape('ats.board', {}, { idempotencyKey: 'import-acme' }));
+    const keys = mock.calls.map(keyOf);
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(keys[2]).toBe('import-acme');
   });
 
-  it('is not sent again after a timeout', async () => {
-    const mock = mockFetch(hang);
-    const { error } = await settle(makeClient(mock.fetch).scrapers.run('ats.board', {}, { timeout: 1000 }));
-    expect(error).toBeInstanceOf(APIConnectionTimeoutError);
+  it('throws ConflictError when the key was used for another request', async () => {
+    const mock = mockFetch(apiError(409, 'idempotency_conflict', 'Used.', { run_id: 'run_1' }));
+    const { error } = await settle(makeClient(mock.fetch).scrapers.run('ats.board', {}, { idempotencyKey: 'import-acme' }));
+    expect(error).toBeInstanceOf(ConflictError);
+    expect((error as ConflictError).details).toEqual({ run_id: 'run_1' });
     expect(mock.calls).toHaveLength(1);
   });
 
@@ -204,7 +215,7 @@ describe('starting a run is not repeated blindly', () => {
 
   it('gives the request more time than the `wait` it asks for', async () => {
     const mock = mockFetch(hang);
-    const pending = makeClient(mock.fetch).scrapers.run('ats.board', {}, { wait: 60 });
+    const pending = makeClient(mock.fetch, { maxRetries: 0 }).scrapers.run('ats.board', {}, { wait: 60 });
     const assertion = expect(pending).rejects.toBeInstanceOf(APIConnectionTimeoutError);
     await vi.advanceTimersByTimeAsync(89_999);
     expect(mock.calls[0]!.signal!.aborted).toBe(false);

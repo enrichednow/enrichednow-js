@@ -191,11 +191,12 @@ describe('scrape()', () => {
     expect(mock.calls).toHaveLength(2);
   });
 
-  it('does not start a second run after a 500', async () => {
-    const mock = mockFetch(apiError(500, 'internal'));
+  it('sends the start again after a 500, under the same idempotency key, and gives up as any request does', async () => {
+    const mock = mockFetch(apiError(500, 'internal'), apiError(500, 'internal'), apiError(500, 'internal'));
     const { error } = await settle(makeClient(mock.fetch).scrape('ats.board', input));
     expect(error).toBeInstanceOf(ServerError);
-    expect(mock.calls).toHaveLength(1);
+    expect(mock.calls).toHaveLength(3);
+    expect(new Set(mock.calls.map((call) => JSON.stringify(Object.entries(call.headers).filter(([name]) => name.toLowerCase() === 'idempotency-key')))).size).toBe(1);
   });
 
   it('passes validation errors through', async () => {

@@ -12,7 +12,9 @@ import type { PagePromise, RecordsPage } from './pagination';
 import { Data } from './resources/data';
 import { Runs, isFailedStatus, isTerminalStatus, pollRun } from './resources/runs';
 import { Scrapers } from './resources/scrapers';
+import type { RunStartOptions } from './resources/scrapers';
 import { UsageResource } from './resources/usage';
+import { Webhooks } from './resources/webhooks';
 import type { Health, JSONObject, Run } from './types';
 import { VERSION } from './version';
 
@@ -81,6 +83,10 @@ export interface ScrapeOptions extends Omit<RequestOptions, 'timeout'> {
   throwOnFailure?: boolean | undefined;
   /** Records per page when the records are read: 1 to 1000. Default: the API's, 100. */
   pageSize?: number | undefined;
+  /** An `https` URL that is also told when the run ends: see {@link RunStartOptions.webhookUrl}. */
+  webhookUrl?: string | undefined;
+  /** Names this call so that it can be repeated without a second run: see {@link RunStartOptions.idempotencyKey}. */
+  idempotencyKey?: string | undefined;
 }
 
 export interface ScrapeResult<TRecord = JSONObject, TInput = JSONObject> {
@@ -118,6 +124,8 @@ export class EnrichedNow {
   readonly usage: UsageResource;
   /** The datasets: job postings and companies. */
   readonly data: Data;
+  /** Webhooks: the endpoints told when a run ends, their signing secrets, and the delivery log. */
+  readonly webhooks: Webhooks;
 
   private readonly fetchImpl: Fetch;
   private readonly defaultHeaders: HeadersInput;
@@ -155,6 +163,7 @@ export class EnrichedNow {
     this.runs = new Runs(this);
     this.usage = new UsageResource(this);
     this.data = new Data(this);
+    this.webhooks = new Webhooks(this);
   }
 
   /**
@@ -178,11 +187,14 @@ export class EnrichedNow {
     input: TInput,
     options: ScrapeOptions = {},
   ): Promise<ScrapeResult<TRecord, TInput>> {
-    const { wait = 60, timeout = DEFAULT_RUN_TIMEOUT, pollInterval, throwOnFailure = true, pageSize, ...request } = options;
+    const { wait = 60, timeout = DEFAULT_RUN_TIMEOUT, pollInterval, throwOnFailure = true, pageSize, webhookUrl, idempotencyKey, ...request } = options;
     const deadline = Date.now() + timeout;
     const hold = Math.max(0, Math.min(wait, timeout / 1000));
 
-    let run = await this.scrapers.run<TInput>(scraperId, input, { ...request, wait: hold });
+    const start: RunStartOptions = { ...request, wait: hold };
+    if (webhookUrl !== undefined) start.webhookUrl = webhookUrl;
+    if (idempotencyKey !== undefined) start.idempotencyKey = idempotencyKey;
+    let run = await this.scrapers.run<TInput>(scraperId, input, start);
     if (!isTerminalStatus(run.status)) {
       run = await pollRun<TInput>(this, run.id, { deadline, timeout, pollInterval, last: run, ...request });
     }

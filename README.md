@@ -99,6 +99,7 @@ const all = await records.toArray();
 | `pollInterval` | `2_000` | Milliseconds between two looks at a run that is still going. |
 | `throwOnFailure` | `true` | Throw `RunFailedError` when the run ends `failed`, `unsupported` or `cancelled`. |
 | `pageSize` | the API's, `100` | Records per page when the records are read (1 to 1000). |
+| `webhookUrl` | | An `https` URL that is also told when the run ends. See [Webhooks](#webhooks). |
 | `signal`, `maxRetries`, `headers` | | As for every request. |
 
 How a run can end, and what `scrape()` does with it:
@@ -227,6 +228,83 @@ const first400 = await client.data.postings.list({ title: 'nurse', limit: 200 })
 await client.health(); // { status: 'ok' }
 ```
 
+### Webhooks
+
+Instead of polling, have a URL of yours told when a run ends. An endpoint is an `https` URL and the events it
+wants: `run.succeeded` (the status `ok`), `run.partial`, `run.failed`, `run.unsupported`, `run.cancelled`.
+
+```ts
+const endpoint = await client.webhooks.create({
+  url: 'https://example.com/hooks/enrichednow',
+  events: ['run.succeeded', 'run.partial', 'run.failed'],
+  description: 'production',
+});
+endpoint.secret; // the signing secret (whsec_…) is shown only here: store it
+
+const { endpoints, run_secret_set } = await client.webhooks.list();
+await client.webhooks.get(endpoint.id);
+await client.webhooks.update(endpoint.id, { enabled: false });  // any of url, events, description, enabled
+await client.webhooks.rotateSecret(endpoint.id);                // a new secret; the old one stops at once
+await client.webhooks.delete(endpoint.id);
+
+for await (const delivery of client.webhooks.deliveries.list({ status: 'failed' })) { /* the delivery log, newest first */ }
+await client.webhooks.deliveries.resend(deliveryId);            // send one again
+```
+
+For one run, name a URL when you start it. It is told when that run ends, whichever way it ends, beside your
+endpoints. What is sent there is signed with the account's run secret, which you make once:
+
+```ts
+const { secret } = await client.webhooks.createRunSecret();     // shown only here
+const run = await client.scrapers.run('careers.company', { domain: 'acme.com' }, {
+  webhookUrl: 'https://example.com/hooks/run-done',             // scrape() takes it too
+});
+```
+
+## Receiving a webhook
+
+Anybody who learns your URL can post to it, so check the signature before you act on a request. `verifyWebhook`
+and `parseWebhook` need no client and make no request. Give them the body exactly as it arrived, as raw bytes,
+before any JSON parsing:
+
+```ts
+import express from 'express';
+import { WebhookVerificationError, parseWebhook } from 'enrichednow';
+
+const app = express();
+
+app.post('/hooks/enrichednow', express.raw({ type: 'application/json' }), (req, res) => {
+  try {
+    const event = parseWebhook(
+      process.env.ENRICHEDNOW_WEBHOOK_SECRET!,
+      req.get('X-Webhook-Timestamp'),
+      req.body,                              // a Buffer: the raw bytes
+      req.get('X-Webhook-Signature'),
+    );
+    console.log(event.id, event.type, event.data.run.id, event.data.run.record_count);
+    res.sendStatus(204);
+  } catch (error) {
+    if (!(error instanceof WebhookVerificationError)) throw error;
+    res.sendStatus(400);
+  }
+});
+```
+
+| | |
+| --- | --- |
+| `verifyWebhook(secret, timestamp, body, signature, { toleranceSeconds })` | `true` or `false`. Never throws for what a request can carry. |
+| `parseWebhook(secret, timestamp, body, signature, { toleranceSeconds })` | The `WebhookEvent` (`id`, `type`, `created_at`, `data.run`); throws `WebhookVerificationError` for a request that does not verify. |
+
+`body` is a `Buffer`, `Uint8Array` or `ArrayBuffer`; a string is taken as UTF-8. Both compare in constant time and
+refuse a timestamp more than 5 minutes from now (`toleranceSeconds`, default `300`).
+
+Both are synchronous and work the same on every runtime the library supports, Cloudflare Workers and Vercel Edge
+included: they need neither `node:crypto` nor Web Crypto. On those runtimes read the body with
+`await request.arrayBuffer()`.
+
+An event can arrive more than once, and is sent again when you resend a delivery; `event.id` is the same every
+time, so use it to ignore a repeat. Answer with a 2xx quickly and do the work afterwards.
+
 ### Anything else
 
 ```ts
@@ -317,13 +395,14 @@ person; its wording can change), `details`, `headers`, `body`, and `requestId` w
 | `APIConnectionTimeoutError` | — | — | The request took longer than `timeout`. Extends `APIConnectionError`. |
 | `APIUserAbortError` | — | — | You aborted the request through its `signal`. |
 
-All of these extend `APIError`, which extends `EnrichedNowError`. Two errors are not about a request and extend
+All of these extend `APIError`, which extends `EnrichedNowError`. Three errors are not about a request and extend
 `EnrichedNowError` directly:
 
 | Class | When | Carries |
 | --- | --- | --- |
 | `RunFailedError` | A run ended `failed`, `unsupported` or `cancelled` (thrown by `scrape()`). | `status`, `reason`, `runId`, `run` |
 | `RunTimeoutError` | A run was still going after the `timeout` of `scrape()` or `runs.wait()`. | `runId`, `run` |
+| `WebhookVerificationError` | A webhook request did not verify (thrown by `parseWebhook()`). | |
 
 ## Retries
 
@@ -337,9 +416,14 @@ that doubles each time — 0.5 s, 1 s, 2 s, up to 8 s — shortened at random by
 | `429` | Yes, after the seconds in `Retry-After` when the response has the header. A wait of more than a minute is not sat out: the error is thrown, with `retryAfter` on it. |
 | `401`, `402`, `403`, `404`, `422` | No. The same request gets the same answer. |
 
-**Starting a run is the exception.** `scrapers.run()` and `scrape()` do not send the request again after a
-connection error, a timeout or a `5xx`: starting a run is not idempotent, and the first run may exist. Look at
-`client.runs.list()` before starting it again. Only a `429` is retried, because it says no run was created.
+**Starting a run is safe to repeat too.** `scrapers.run()` and `scrape()` send an `Idempotency-Key` with the
+request, a new one for each call, so a retry after a connection error, a timeout or a `5xx` gets the run the first
+attempt started and never a second one. To make a call of your own repeatable (a job that may be restarted, say),
+pass your own key: `client.scrape('ats.board', input, { idempotencyKey: 'import-2026-11-19-acme' })`. For 24 hours
+the same key with the same request gives the same run; the same key with a different request throws `ConflictError`.
+
+`webhooks.create()` and `webhooks.deliveries.resend()` are the exception: they are not sent again after a connection
+error, a timeout or a `5xx`, because a repeat would add a second endpoint, or queue the delivery twice.
 
 ```ts
 const client = new EnrichedNow({ maxRetries: 5 });

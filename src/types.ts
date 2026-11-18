@@ -124,6 +124,144 @@ export interface RecordListParams {
   cursor?: string;
 }
 
+// --- webhooks --------------------------------------------------------------------------------------------------------
+
+/** How a run ended, as a webhook names it. `run.succeeded` is the status `ok`. */
+export type WebhookEventName = 'run.succeeded' | 'run.partial' | 'run.failed' | 'run.unsupported' | 'run.cancelled';
+
+/** A URL of yours that is sent a signed `POST` when a run ends with one of the events it asked for. */
+export interface WebhookEndpoint {
+  /** `whk_…` */
+  id: string;
+  url: string;
+  /** A note for yourself. */
+  description: string;
+  /** The run endings it is told about. */
+  events: WebhookEventName[];
+  /** `false`: nothing is sent to it. */
+  enabled: boolean;
+  /** Why it was switched off for you (its deliveries failed for a day). `null` when it is on, and when you switched it off yourself. */
+  disabled_reason: string | null;
+  disabled_at: string | null;
+  /** When a delivery to it last succeeded. */
+  last_success_at: string | null;
+  /** When an attempt to deliver to it last failed. */
+  last_failure_at: string | null;
+  created_at: string;
+}
+
+/** An endpoint with its signing secret: what creating one, or replacing its secret, returns. */
+export interface WebhookEndpointWithSecret extends WebhookEndpoint {
+  /** The signing secret (`whsec_…`). Returned only here, once: store it. */
+  secret: string;
+}
+
+/** The body of `GET /v1/webhooks`. */
+export interface WebhookEndpointList {
+  endpoints: WebhookEndpoint[];
+  /** Whether the account has a signing secret for a run's own `webhook_url`. */
+  run_secret_set: boolean;
+}
+
+/** The body of `POST /v1/webhooks/run-secret`. */
+export interface WebhookSecret {
+  /** The signing secret (`whsec_…`). Returned only here, once: store it. */
+  secret: string;
+}
+
+export interface WebhookEndpointCreateParams {
+  /** Where to `POST`: an `https` URL. */
+  url: string;
+  /** The run endings to be told about; at least one. */
+  events: WebhookEventName[];
+  /** A note for yourself, up to 200 characters. */
+  description?: string;
+}
+
+/** What to change of an endpoint: at least one of these. */
+export interface WebhookEndpointUpdateParams {
+  url?: string;
+  events?: WebhookEventName[];
+  description?: string;
+  /** `false` switches the endpoint off; `true` switches it on again. */
+  enabled?: boolean;
+}
+
+export type WebhookDeliveryStatus = 'pending' | 'succeeded' | 'failed' | 'cancelled';
+
+/** One event sent to one target, with how its last attempt went. */
+export interface WebhookDelivery {
+  /** `whd_…` */
+  id: string;
+  /** `null` for a delivery to a run's own `webhook_url`. */
+  endpoint_id: string | null;
+  run_id: string;
+  /** The `id` in the event's body and the `X-Webhook-Id` header: the same on every attempt, and when the delivery is sent again. */
+  event_id: string;
+  event: WebhookEventName;
+  url: string;
+  /**
+   * `pending`: waiting for its next attempt. `succeeded`: answered 2xx. `failed`: out of attempts. `cancelled`: its
+   * endpoint was switched off or deleted first.
+   */
+  status: WebhookDeliveryStatus;
+  /** Attempts made so far. */
+  attempts: number;
+  max_attempts: number;
+  /** When it is tried next; `null` once it has ended. */
+  next_attempt_at: string | null;
+  /** The HTTP status of the last attempt's answer, when there was one. */
+  response_status: number | null;
+  /**
+   * A stable code for why the last attempt failed (`http_error`, `redirect_refused`, `timeout`, `connection_failed`,
+   * `tls_error`, `dns_failed`, `address_not_allowed`, `url_not_allowed`) or why the delivery was cancelled
+   * (`endpoint_disabled`, `endpoint_deleted`). `null` after a success.
+   */
+  error: string | null;
+  /** How long the last attempt took, in milliseconds. */
+  duration_ms: number | null;
+  last_attempt_at: string | null;
+  created_at: string;
+  finished_at: string | null;
+  /** The delivery this one was sent again from. */
+  resend_of: string | null;
+}
+
+/** The body of `GET /v1/webhooks/deliveries`. */
+export interface WebhookDeliveryList {
+  deliveries: WebhookDelivery[];
+  next_cursor: string | null;
+}
+
+export interface WebhookDeliveryListParams {
+  /** Deliveries per page: 1 to 100. Default 20. */
+  limit?: number;
+  /** The `next_cursor` of the page before. */
+  cursor?: string;
+  /** Only deliveries to this endpoint. */
+  endpoint_id?: string;
+  /** Only deliveries about this run. */
+  run_id?: string;
+  /** Only deliveries with this status. */
+  status?: WebhookDeliveryStatus;
+}
+
+/**
+ * What a webhook request carries. `parseWebhook` returns it from a request that verified.
+ *
+ * @typeParam TInput - The run's input, as sent.
+ */
+export interface WebhookEvent<TInput = JSONObject> {
+  /** `evt_…`: the same on every attempt and when the delivery is sent again, so use it to ignore a repeat. */
+  id: string;
+  type: WebhookEventName;
+  created_at: string;
+  data: {
+    /** The run that ended, as `client.runs.get()` would return it. */
+    run: Run<TInput>;
+  };
+}
+
 // --- usage -----------------------------------------------------------------------------------------------------------
 
 export type UsageGroupBy = 'day' | 'scraper' | 'product';

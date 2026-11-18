@@ -77,6 +77,7 @@ export class APIError extends EnrichedNowError {
     if (status === 402) return new QuotaExceededError(message, init);
     if (status === 403) return new PermissionDeniedError(message, init);
     if (status === 404) return new NotFoundError(message, init);
+    if (status === 409) return new ConflictError(message, init);
     if (status === 400 || status === 422) return new ValidationError(message, init);
     if (status === 429) return new RateLimitError(message, init);
     if (status >= 500) return new ServerError(message, init);
@@ -108,6 +109,17 @@ export class NotFoundError extends APIError {
   constructor(message: string, init?: APIErrorInit) {
     super(message, init);
     this.name = 'NotFoundError';
+  }
+}
+
+/**
+ * `409 idempotency_conflict`: the idempotency key was already used, in the last 24 hours, for a different request.
+ * `details.run_id` is the run that key started.
+ */
+export class ConflictError extends APIError {
+  constructor(message: string, init?: APIErrorInit) {
+    super(message, init);
+    this.name = 'ConflictError';
   }
 }
 
@@ -232,6 +244,18 @@ export class RunTimeoutError<TInput = Record<string, unknown>> extends EnrichedN
     this.name = 'RunTimeoutError';
     this.run = run;
     this.runId = run.id;
+  }
+}
+
+/**
+ * A webhook request did not verify: its signature is not this secret's over this timestamp and body, its timestamp
+ * is too far from now, or what was signed is not an event. Thrown by `parseWebhook`. Answer `400` and do nothing
+ * with the request.
+ */
+export class WebhookVerificationError extends EnrichedNowError {
+  constructor(message = 'The webhook request did not verify.', options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'WebhookVerificationError';
   }
 }
 

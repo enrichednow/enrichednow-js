@@ -25,6 +25,7 @@ export {
   AuthenticationError,
   PermissionDeniedError,
   NotFoundError,
+  ConflictError,
   ValidationError,
   QuotaExceededError,
   RateLimitError,
@@ -34,6 +35,7 @@ export {
   APIUserAbortError,
   RunFailedError,
   RunTimeoutError,
+  WebhookVerificationError,
 } from './errors';
 export type { APIErrorInit } from './errors';
 
@@ -45,6 +47,10 @@ export { Runs, isFailedStatus, isTerminalStatus } from './resources/runs';
 export type { RunWaitOptions } from './resources/runs';
 export { UsageResource } from './resources/usage';
 export { Companies, Data, Postings } from './resources/data';
+export { WebhookDeliveries, Webhooks } from './resources/webhooks';
+
+export { DEFAULT_WEBHOOK_TOLERANCE, WEBHOOK_EVENTS, parseWebhook, verifyWebhook } from './webhooks';
+export type { WebhookBody, WebhookVerifyOptions } from './webhooks';
 
 export type * from './types';
 
