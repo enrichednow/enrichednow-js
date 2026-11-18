@@ -19,14 +19,6 @@ npm install enrichednow
 
 Needs Node 18 or later (or any runtime with a global `fetch`).
 
-> **Not on npm yet.** Until the first release is there, build it from this repository:
->
-> ```bash
-> git clone https://github.com/enrichednow/enrichednow-js && cd enrichednow-js
-> pnpm install && pnpm build
-> npm install /path/to/enrichednow-js      # in your project
-> ```
-
 ## Quickstart
 
 Create a key in the console under **API keys**, and put it in the environment:
