@@ -5,14 +5,36 @@ import { Page, PagePromise, RecordsPage } from '../pagination';
 import type {
   FailedRunStatus,
   JSONObject,
+  RecordExportParams,
+  RecordFormat,
   RecordList,
   RecordListParams,
+  RecordsExport,
   Run,
   RunList,
   RunListParams,
   RunStatus,
   TerminalRunStatus,
 } from '../types';
+
+/** Above `wait`, how much longer the request itself may take, in milliseconds. */
+const WAIT_MARGIN = 30_000;
+/** Records a page when a whole run is exported: the API's largest page. */
+const EXPORT_PAGE = 1000;
+const FORMATS: readonly RecordFormat[] = ['csv', 'ndjson'];
+const ACCEPT: Record<RecordFormat, string> = { csv: 'text/csv', ndjson: 'application/x-ndjson' };
+const decoder = new TextDecoder();
+
+export interface RunGetOptions extends RequestOptions {
+  /** Seconds the request stays open for the run to end, 0 to 300. Default 0: the run as it is now. */
+  wait?: number | undefined;
+}
+
+/** A CSV page after the first, without the header row every page starts with (the columns are the same). */
+function withoutHeader(body: Uint8Array): Uint8Array {
+  const end = body.indexOf(0x0a);
+  return end < 0 ? new Uint8Array(0) : body.subarray(end + 1);
+}
 
 const TERMINAL: ReadonlySet<RunStatus> = new Set(['ok', 'partial', 'failed', 'unsupported', 'cancelled']);
 const FAILED: ReadonlySet<RunStatus> = new Set(['failed', 'unsupported', 'cancelled']);
@@ -37,9 +59,16 @@ export interface RunWaitOptions extends Omit<RequestOptions, 'timeout'> {
 export class Runs {
   constructor(private readonly client: EnrichedNow) {}
 
-  /** One run, as it is now. */
-  get<TInput = JSONObject>(runId: string, options?: RequestOptions): Promise<Run<TInput>> {
-    return this.client.request<Run<TInput>>({ method: 'GET', path: `/v1/runs/${encodeURIComponent(runId)}`, ...options });
+  /** One run, as it is now; with `wait`, as it is when it has ended or the time is up. */
+  get<TInput = JSONObject>(runId: string, options: RunGetOptions = {}): Promise<Run<TInput>> {
+    const { wait, ...request } = options;
+    return this.client.request<Run<TInput>>({
+      method: 'GET',
+      path: `/v1/runs/${encodeURIComponent(runId)}`,
+      query: { wait },
+      ...request,
+      timeout: request.timeout ?? (wait ? Math.max(this.client.timeout, wait * 1000 + WAIT_MARGIN) : undefined),
+    });
   }
 
   /**
@@ -119,6 +148,65 @@ export class Runs {
       return new RecordsPage(body.records, body.next_cursor, body.expired === true, fetchPage);
     };
     return new PagePromise(() => fetchPage(params.cursor));
+  }
+
+  /**
+   * One page of a run's records written by the API, as `csv` or `ndjson`.
+   *
+   * The CSV has a column for each field of the scraper's record schema (a nested object becomes `parent.child`, a list
+   * one cell of JSON, a cell a spreadsheet would run as a formula starts with an apostrophe), and every page begins
+   * with the header row. `nextCursor` continues; {@link Runs.exportAll} follows it for you.
+   */
+  async export(runId: string, params: RecordExportParams, options?: RequestOptions): Promise<RecordsExport> {
+    const { format, limit, cursor } = params;
+    if (!FORMATS.includes(format)) throw new TypeError(`format must be one of ${FORMATS.join(', ')}; for JSON use runs.records`);
+    const answer = await this.client.requestBytes({
+      method: 'GET',
+      path: `/v1/runs/${encodeURIComponent(runId)}/records`,
+      query: { format, limit, cursor },
+      ...options,
+      headers: { accept: ACCEPT[format], ...options?.headers },
+    });
+    return {
+      format,
+      body: answer.body,
+      text: decoder.decode(answer.body),
+      nextCursor: answer.headers.get('x-next-cursor') || null,
+      expired: answer.headers.get('x-records-expired') === 'true',
+    };
+  }
+
+  /**
+   * Every record of a run, as `csv` or `ndjson`, page by page: write the pieces one after the other and the result is
+   * one file (a CSV has its header row once).
+   *
+   * ```ts
+   * const out = fs.createWriteStream('records.csv');
+   * for await (const chunk of client.runs.exportAll(run.id, { format: 'csv' })) out.write(chunk);
+   * ```
+   */
+  async *exportAll(runId: string, params: Omit<RecordExportParams, 'cursor'>, options?: RequestOptions): AsyncGenerator<Uint8Array> {
+    let cursor: string | undefined;
+    for (let first = true; ; first = false) {
+      const page = await this.export(runId, { limit: EXPORT_PAGE, ...params, cursor }, options);
+      yield first || page.format !== 'csv' ? page.body : withoutHeader(page.body);
+      if (!page.nextCursor) return;
+      cursor = page.nextCursor;
+    }
+  }
+
+  /**
+   * A file the run produced (a screenshot, say), with this client's key. A record also carries the file's own
+   * address, which works without a key for an hour.
+   */
+  async file(runId: string, name: string, options?: RequestOptions): Promise<Uint8Array> {
+    const answer = await this.client.requestBytes({
+      method: 'GET',
+      path: `/v1/runs/${encodeURIComponent(runId)}/files/${encodeURIComponent(name)}`,
+      ...options,
+      headers: { accept: '*/*', ...options?.headers },
+    });
+    return answer.body;
   }
 }
 

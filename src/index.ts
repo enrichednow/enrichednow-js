@@ -13,6 +13,7 @@ export type {
   ClientOptions,
   Fetch,
   HeadersInput,
+  RawResponse,
   RequestOptions,
   RequestSpec,
   ScrapeOptions,
@@ -44,12 +45,19 @@ export { Page, PagePromise, RecordsPage } from './pagination';
 export { Scrapers } from './resources/scrapers';
 export type { RunStartOptions } from './resources/scrapers';
 export { Runs, isFailedStatus, isTerminalStatus } from './resources/runs';
-export type { RunWaitOptions } from './resources/runs';
+export type { RunGetOptions, RunWaitOptions } from './resources/runs';
 export { UsageResource } from './resources/usage';
 export { Companies, Data, Postings } from './resources/data';
 export { WebhookDeliveries, Webhooks } from './resources/webhooks';
 
-export { DEFAULT_WEBHOOK_TOLERANCE, WEBHOOK_EVENTS, parseWebhook, verifyWebhook } from './webhooks';
+export {
+  DEFAULT_WEBHOOK_TOLERANCE,
+  WEBHOOK_EVENTS,
+  parseWebhook,
+  parseWebhookAsync,
+  verifyWebhook,
+  verifyWebhookAsync,
+} from './webhooks';
 export type { WebhookBody, WebhookVerifyOptions } from './webhooks';
 
 export type * from './types';

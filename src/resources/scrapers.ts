@@ -6,7 +6,7 @@ const WAIT_MARGIN = 30_000;
 
 export interface RunStartOptions extends RequestOptions {
   /**
-   * Seconds the request stays open for the run to end, 0 to 60; fractions are accepted. Default 0: the run comes back
+   * Seconds the request stays open for the run to end, 0 to 300; fractions are accepted. Default 0: the run comes back
    * as soon as it is queued. When the time runs out the run carries on, and comes back `queued` or `running`.
    */
   wait?: number | undefined;

@@ -1,5 +1,16 @@
 import type { EnrichedNow, RequestOptions } from '../client';
-import type { Usage, UsageParams } from '../types';
+import type { Standing, Usage, UsageParams } from '../types';
+
+const NO_STANDING: Standing = {
+  unitsLimit: null,
+  unitsUsed: null,
+  unitsRemaining: null,
+  unitsTopup: null,
+  unitsReset: null,
+  runsLimit: null,
+  runsRemaining: null,
+  unmetered: false,
+};
 
 export class UsageResource {
   constructor(private readonly client: EnrichedNow) {}
@@ -19,6 +30,15 @@ export class UsageResource {
       query: { ...params, from: dateParam(params.from), to: dateParam(params.to) },
       ...options,
     });
+  }
+
+  /**
+   * Where the account stands now: the month's units used and left, the top-up units, when the allowance starts
+   * again, and runs in progress. Read from the headers of the smallest call that carries them.
+   */
+  async standing(options?: RequestOptions): Promise<Standing> {
+    await this.client.request({ method: 'GET', path: '/v1/runs', query: { limit: 1 }, ...options });
+    return this.client.standing ?? NO_STANDING;
   }
 }
 

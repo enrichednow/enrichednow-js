@@ -115,6 +115,12 @@ export interface RunListParams {
   scraper_id?: string;
   /** Only runs with this status. */
   status?: RunStatus;
+  /** Only runs started with this API key (`key_…`). */
+  api_key_id?: string;
+  /** Only runs created at or after this time (RFC 3339, or a day). */
+  from?: string | Date;
+  /** Only runs created before this time (RFC 3339, or a day). */
+  to?: string | Date;
 }
 
 export interface RecordListParams {
@@ -122,6 +128,53 @@ export interface RecordListParams {
   limit?: number;
   /** The `next_cursor` of the page before. */
   cursor?: string;
+}
+
+/** How the API writes records for {@link Runs.export}: `csv` (a header row, then a row a record) or `ndjson`. */
+export type RecordFormat = 'csv' | 'ndjson';
+
+export interface RecordExportParams {
+  format: RecordFormat;
+  /** Records per page: 1 to 1000. Default 100 for one page, 1000 for {@link Runs.exportAll}. */
+  limit?: number;
+  /** The `nextCursor` of the page before. */
+  cursor?: string;
+}
+
+/** One page of a run's records as the API wrote it. */
+export interface RecordsExport {
+  format: RecordFormat;
+  /** The page's bytes: UTF-8 text. */
+  body: Uint8Array;
+  /** The page as text. */
+  text: string;
+  /** Where the next page starts (the `X-Next-Cursor` header); `null` on the last page. */
+  nextCursor: string | null;
+  /** True when the records are gone: they are kept 7 days after a run ends. */
+  expired: boolean;
+}
+
+/**
+ * Where the account stands, as the API says it in the headers of every answer about runs (`X-Units-*`,
+ * `X-RateLimit-*`). A number the answer did not carry is `null`.
+ */
+export interface Standing {
+  /** The month's allowance of units. For an unmetered account, the largest number the API's integers hold. */
+  unitsLimit: number | null;
+  /** Units of the month's allowance used so far. */
+  unitsUsed: number | null;
+  /** Units of the month's allowance left. Top-up units are counted apart. */
+  unitsRemaining: number | null;
+  /** Top-up units left: spent once the month's allowance is used up; they do not expire. */
+  unitsTopup: number | null;
+  /** When the allowance starts again: the first of next month, RFC 3339 UTC. */
+  unitsReset: string | null;
+  /** Runs the account may have in progress at the same time. */
+  runsLimit: number | null;
+  /** How many more runs can be started now. */
+  runsRemaining: number | null;
+  /** True for an account with no unit limit. */
+  unmetered: boolean;
 }
 
 // --- webhooks --------------------------------------------------------------------------------------------------------
@@ -298,6 +351,8 @@ export interface Usage {
   /** The account's allowance for a calendar month (UTC): the data allowance with `product: 'data'`, otherwise the unit allowance. */
   allowance_units: number;
   rows: UsageRow[];
+  /** True for an account with no unit limit (the service's own): nothing it does is refused for units. */
+  unmetered?: boolean;
 }
 
 // --- datasets: /v1/data ----------------------------------------------------------------------------------------------

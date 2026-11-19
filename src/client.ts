@@ -15,7 +15,7 @@ import { Scrapers } from './resources/scrapers';
 import type { RunStartOptions } from './resources/scrapers';
 import { UsageResource } from './resources/usage';
 import { Webhooks } from './resources/webhooks';
-import type { Health, JSONObject, Run } from './types';
+import type { Health, JSONObject, Run, Standing } from './types';
 import { VERSION } from './version';
 
 const INITIAL_RETRY_DELAY = 500;
@@ -72,8 +72,15 @@ export interface RequestSpec extends RequestOptions {
   idempotent?: boolean | undefined;
 }
 
+/** An answer of the API whose body is not JSON, as {@link EnrichedNow.requestBytes} returns it. */
+export interface RawResponse {
+  status: number;
+  headers: Headers;
+  body: Uint8Array;
+}
+
 export interface ScrapeOptions extends Omit<RequestOptions, 'timeout'> {
-  /** Seconds the first request stays open for the run to end, 0 to 60. Default 60. */
+  /** Seconds the first request stays open for the run to end, 0 to 300. Default 60. */
   wait?: number | undefined;
   /** Milliseconds to wait for the run to end, in all. Default 600 000. Past it, {@link RunTimeoutError} is thrown; the run carries on. */
   timeout?: number | undefined;
@@ -129,6 +136,16 @@ export class EnrichedNow {
 
   private readonly fetchImpl: Fetch;
   private readonly defaultHeaders: HeadersInput;
+  private lastStanding: Standing | null = null;
+
+  /**
+   * Where the account stood at the last answer that said so: every answer about runs carries the account's units and
+   * runs in progress in its headers (`X-Units-*`, `X-RateLimit-*`). `null` until such an answer has come;
+   * `client.usage.standing()` asks for it.
+   */
+  get standing(): Standing | null {
+    return this.lastStanding;
+  }
 
   constructor(options: ClientOptions = {}) {
     const apiKey = options.apiKey ?? readEnv('ENRICHEDNOW_API_KEY');
@@ -215,6 +232,30 @@ export class EnrichedNow {
    * do not cover.
    */
   async request<T = unknown>(spec: RequestSpec): Promise<T> {
+    const { response, body } = await this.exchange(spec);
+    const text = decoder.decode(body);
+    const parsed = parseBody(text);
+    if (parsed === INVALID_JSON) {
+      throw new APIError('The API answered with a body that is not JSON.', {
+        status: response.status,
+        headers: response.headers,
+        body: text,
+        requestId: response.headers.get('x-request-id') ?? undefined,
+      });
+    }
+    return parsed as T;
+  }
+
+  /**
+   * Send a request to the API and return the answer's bytes and headers, for a body that is not JSON (records as CSV
+   * or NDJSON, a file a run produced). An error answer throws as {@link EnrichedNow.request} does.
+   */
+  async requestBytes(spec: RequestSpec): Promise<RawResponse> {
+    const { response, body } = await this.exchange(spec);
+    return { status: response.status, headers: response.headers, body };
+  }
+
+  private async exchange(spec: RequestSpec): Promise<{ response: Response; body: Uint8Array }> {
     const { method, path, query, body, signal } = spec;
     const maxRetries = spec.maxRetries ?? this.maxRetries;
     const timeout = spec.timeout ?? this.timeout;
@@ -236,12 +277,12 @@ export class EnrichedNow {
       signal?.addEventListener('abort', onAbort, { once: true });
 
       let response: Response;
-      let text: string;
+      let bytes: Uint8Array;
       try {
         const init: RequestInit = { method, headers, signal: controller.signal };
         if (payload !== undefined) init.body = payload;
         response = await this.fetchImpl(url, init);
-        text = await response.text();
+        bytes = new Uint8Array(await response.arrayBuffer());
       } catch (cause) {
         if (signal?.aborted) throw new APIUserAbortError(undefined, { cause });
         const error = timedOut
@@ -258,19 +299,12 @@ export class EnrichedNow {
         signal?.removeEventListener('abort', onAbort);
       }
 
-      const parsed = parseBody(text);
-      if (response.ok) {
-        if (parsed === INVALID_JSON) {
-          throw new APIError('The API answered with a body that is not JSON.', {
-            status: response.status,
-            headers: response.headers,
-            body: text,
-            requestId: response.headers.get('x-request-id') ?? undefined,
-          });
-        }
-        return parsed as T;
-      }
+      const standing = standingFromHeaders(response.headers);
+      if (standing !== null) this.lastStanding = standing;
+      if (response.ok) return { response, body: bytes };
 
+      const text = decoder.decode(bytes);
+      const parsed = parseBody(text);
       const error = APIError.fromResponse(response.status, parsed === INVALID_JSON ? text : parsed, response.headers);
       if (attempt < maxRetries && shouldRetry(response.status, idempotent)) {
         const asked = retryAfterMs(response.headers);
@@ -318,6 +352,27 @@ export class EnrichedNow {
 }
 
 const INVALID_JSON = Symbol('invalid JSON');
+const decoder = new TextDecoder();
+
+/** The account's standing an answer's headers carry, or `null` when it carries none (an answer not about runs). */
+export function standingFromHeaders(headers: Headers): Standing | null {
+  if (!headers.has('x-units-limit') && !headers.has('x-ratelimit-limit')) return null;
+  const number = (name: string): number | null => {
+    const value = headers.get(name);
+    if (value === null || !/^-?[0-9]+$/.test(value.trim())) return null;
+    return Number(value);
+  };
+  return {
+    unitsLimit: number('x-units-limit'),
+    unitsUsed: number('x-units-used'),
+    unitsRemaining: number('x-units-remaining'),
+    unitsTopup: number('x-units-topup'),
+    unitsReset: headers.get('x-units-reset'),
+    runsLimit: number('x-ratelimit-limit'),
+    runsRemaining: number('x-ratelimit-remaining'),
+    unmetered: headers.get('x-units-unmetered') === 'true',
+  };
+}
 
 function parseBody(text: string): unknown {
   if (text === '') return undefined;

@@ -37,8 +37,10 @@ export interface WebhookVerifyOptions {
  * `false` when it does not match (compared in constant time), when anything is missing or malformed, and when the
  * timestamp is more than `toleranceSeconds` from now, so a recorded request cannot be played back later.
  *
- * Synchronous, and the same on every runtime: it uses neither `node:crypto` nor Web Crypto. It never throws for
- * what a request can carry: a request that is not right is `false`.
+ * Synchronous. It computes the HMAC with the runtime's own `node:crypto` where there is one (Node, Bun, Deno), and
+ * with a bundled SHA-256 on an edge runtime, where the only HMAC is Web Crypto's, which is asynchronous: there, or
+ * anywhere, {@link verifyWebhookAsync} uses Web Crypto instead. It never throws for what a request can carry: a
+ * request that is not right is `false`.
  *
  * @param secret - The endpoint's signing secret (`whsec_…`); for a run's own `webhook_url`, the account's run secret.
  * @param timestamp - The `X-Webhook-Timestamp` header.
@@ -52,20 +54,108 @@ export function verifyWebhook(
   signature: string | null | undefined,
   options: WebhookVerifyOptions = {},
 ): boolean {
-  const tolerance = options.toleranceSeconds ?? DEFAULT_WEBHOOK_TOLERANCE;
-  if (typeof secret !== 'string' || secret === '' || typeof signature !== 'string') return false;
-  if (typeof timestamp !== 'string' && typeof timestamp !== 'number') return false;
-  const sent = String(timestamp);
-  if (!/^[0-9]{1,16}$/.test(sent)) return false;
-  if (!(Math.abs(Date.now() / 1000 - Number(sent)) <= tolerance)) return false;
-  const raw = toBytes(body);
-  if (raw === undefined) return false;
+  const message = signedMessage(secret, timestamp, body, signature, options);
+  if (message === undefined) return false;
+  const key = encoder.encode(secret);
+  const node = nodeCrypto();
+  const expected = encoder.encode(`v1=${node ? node.createHmac('sha256', key).update(message).digest('hex') : hmacSha256Hex(key, message)}`);
+  const given = encoder.encode(signature as string);
+  if (expected.length !== given.length) return false;
+  return node ? node.timingSafeEqual(expected, given) : timingSafeEqual(expected, given);
+}
 
+/**
+ * {@link verifyWebhook}, with the HMAC of the platform's Web Crypto (`crypto.subtle`), which every runtime has: Node,
+ * Bun, Deno, browsers and edge runtimes. Its comparison is Web Crypto's own, in constant time.
+ *
+ * ```ts
+ * // a Cloudflare Worker, or a Next.js route on the edge runtime
+ * const body = await request.arrayBuffer();
+ * const ok = await verifyWebhookAsync(env.ENRICHEDNOW_WEBHOOK_SECRET, request.headers.get('x-webhook-timestamp'),
+ *   body, request.headers.get('x-webhook-signature'));
+ * ```
+ */
+export async function verifyWebhookAsync(
+  secret: string,
+  timestamp: string | number | null | undefined,
+  body: WebhookBody,
+  signature: string | null | undefined,
+  options: WebhookVerifyOptions = {},
+): Promise<boolean> {
+  const message = signedMessage(secret, timestamp, body, signature, options);
+  if (message === undefined) return false;
+  const subtle = globalThis.crypto?.subtle;
+  if (subtle === undefined) return verifyWebhook(secret, timestamp, body, signature, options);
+  const hex = /^v1=([0-9a-f]{64})$/.exec(signature as string)?.[1];
+  if (hex === undefined) return false;
+  const digest = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) digest[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  try {
+    const key = await subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
+    return await subtle.verify('HMAC', key, digest, message);
+  } catch {
+    return false;
+  }
+}
+
+/** {@link parseWebhook}, verified with Web Crypto as {@link verifyWebhookAsync} is. */
+export async function parseWebhookAsync<TInput = Record<string, unknown>>(
+  secret: string,
+  timestamp: string | number | null | undefined,
+  body: WebhookBody,
+  signature: string | null | undefined,
+  options: WebhookVerifyOptions = {},
+): Promise<WebhookEvent<TInput>> {
+  if (!(await verifyWebhookAsync(secret, timestamp, body, signature, options))) throw notVerified();
+  return eventOf<TInput>(body);
+}
+
+/** What was signed — the timestamp, a dot and the body — or `undefined` when the request cannot verify. */
+function signedMessage(
+  secret: unknown,
+  timestamp: unknown,
+  body: unknown,
+  signature: unknown,
+  options: WebhookVerifyOptions,
+): Uint8Array<ArrayBuffer> | undefined {
+  const tolerance = options.toleranceSeconds ?? DEFAULT_WEBHOOK_TOLERANCE;
+  if (typeof secret !== 'string' || secret === '' || typeof signature !== 'string') return undefined;
+  if (typeof timestamp !== 'string' && typeof timestamp !== 'number') return undefined;
+  const sent = String(timestamp);
+  if (!/^[0-9]{1,16}$/.test(sent)) return undefined;
+  if (!(Math.abs(Date.now() / 1000 - Number(sent)) <= tolerance)) return undefined;
+  const raw = toBytes(body);
+  if (raw === undefined) return undefined;
   const prefix = encoder.encode(`${sent}.`);
   const message = new Uint8Array(prefix.length + raw.length);
   message.set(prefix);
   message.set(raw, prefix.length);
-  return timingSafeEqual(encoder.encode(`v1=${hmacSha256Hex(encoder.encode(secret), message)}`), encoder.encode(signature));
+  return message;
+}
+
+interface NodeCrypto {
+  createHmac(algorithm: string, key: Uint8Array): { update(data: Uint8Array): { digest(encoding: 'hex'): string } };
+  timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean;
+}
+
+let nodeCryptoModule: NodeCrypto | null | undefined;
+
+/**
+ * The runtime's `node:crypto`, reached without an import (`process.getBuiltinModule`, Node 20.16 and later, Bun and
+ * Deno), so that the package still loads, unbundled and untouched, where there is none; `undefined` there.
+ */
+function nodeCrypto(): NodeCrypto | undefined {
+  if (nodeCryptoModule === undefined) {
+    nodeCryptoModule = null;
+    try {
+      const scope = globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } };
+      const found = scope.process?.getBuiltinModule?.('node:crypto') as Partial<NodeCrypto> | undefined;
+      if (typeof found?.createHmac === 'function' && typeof found.timingSafeEqual === 'function') nodeCryptoModule = found as NodeCrypto;
+    } catch {
+      nodeCryptoModule = null;
+    }
+  }
+  return nodeCryptoModule ?? undefined;
 }
 
 /**
@@ -90,12 +180,18 @@ export function parseWebhook<TInput = Record<string, unknown>>(
   signature: string | null | undefined,
   options: WebhookVerifyOptions = {},
 ): WebhookEvent<TInput> {
-  if (!verifyWebhook(secret, timestamp, body, signature, options)) {
-    throw new WebhookVerificationError(
-      'The webhook request did not verify: the signature does not match this secret, timestamp and body, ' +
-        'or the timestamp is too far from now.',
-    );
-  }
+  if (!verifyWebhook(secret, timestamp, body, signature, options)) throw notVerified();
+  return eventOf<TInput>(body);
+}
+
+function notVerified(): WebhookVerificationError {
+  return new WebhookVerificationError(
+    'The webhook request did not verify: the signature does not match this secret, timestamp and body, ' +
+      'or the timestamp is too far from now.',
+  );
+}
+
+function eventOf<TInput>(body: WebhookBody): WebhookEvent<TInput> {
   let event: unknown;
   try {
     event = JSON.parse(typeof body === 'string' ? body : new TextDecoder('utf-8', { fatal: true }).decode(toBytes(body)));
@@ -127,8 +223,9 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 // --- HMAC-SHA256 -------------------------------------------------------------------------------------------------------
-// Written out here (FIPS 180-4, RFC 2104) so that verifying is synchronous and the same on Node, Bun, Deno and edge
-// runtimes, without a dependency and without `node:crypto`. The tests check it against Node's own, length by length.
+// For `verifyWebhook` on a runtime without `node:crypto` (an edge runtime), where Web Crypto's HMAC is asynchronous
+// and a synchronous function cannot wait for it (FIPS 180-4, RFC 2104). Everywhere else the runtime's own is used.
+// The tests check it against Node's own, length by length.
 
 const BLOCK = 64;
 

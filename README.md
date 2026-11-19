@@ -176,6 +176,24 @@ comes back `running` — follow it with `runs.wait()` to see how it ended.
 A run's records are kept for 7 days after the run ended. After that the list is empty and the page's `expired` is
 `true`; the run itself stays.
 
+`runs.get(runId, { wait: 120 })` holds the request until the run has ended, up to 300 seconds; so does `wait` on
+`scrapers.run`. `runs.list` also takes `api_key_id`, `from` and `to`.
+
+#### CSV and NDJSON, written by the API
+
+```ts
+import { createWriteStream } from 'node:fs';
+
+const out = createWriteStream('jobs.csv');
+for await (const chunk of client.runs.exportAll(run.id, { format: 'csv' })) out.write(chunk); // the header row once
+
+const page = await client.runs.export(run.id, { format: 'ndjson', limit: 500 }); // page.text, page.nextCursor, page.expired
+```
+
+The CSV has a column for each field of the scraper's record schema, in its order; a nested object becomes
+`parent.child` columns, a list one cell of JSON, and a cell a spreadsheet would run as a formula starts with an
+apostrophe. A file a run made (a screenshot) is `await client.runs.file(run.id, 'screenshot.png')`, as bytes.
+
 ### Usage
 
 ```ts
@@ -187,6 +205,15 @@ const byScraper = await client.usage.get({
   product: 'scrapers',       // 'scrapers' | 'data'
 });
 console.log(byScraper.total_units, byScraper.allowance_units, byScraper.rows);
+```
+
+`usage.unmetered` is `true` for an account with no unit limit.
+
+Every answer about runs carries the account's units and runs in progress in its headers. `client.standing` is the
+last one seen; `client.usage.standing()` asks for it:
+
+```ts
+const { unitsRemaining, unitsTopup, unitsReset, runsRemaining, unmetered } = await client.usage.standing();
 ```
 
 ### Datasets
@@ -298,9 +325,16 @@ app.post('/hooks/enrichednow', express.raw({ type: 'application/json' }), (req, 
 `body` is a `Buffer`, `Uint8Array` or `ArrayBuffer`; a string is taken as UTF-8. Both compare in constant time and
 refuse a timestamp more than 5 minutes from now (`toleranceSeconds`, default `300`).
 
-Both are synchronous and work the same on every runtime the library supports, Cloudflare Workers and Vercel Edge
-included: they need neither `node:crypto` nor Web Crypto. On those runtimes read the body with
-`await request.arrayBuffer()`.
+Both are synchronous. They compute the HMAC with the runtime's own `node:crypto` (Node, Bun, Deno). On an edge
+runtime (Cloudflare Workers, Vercel Edge) there is no synchronous HMAC, only Web Crypto's, which is asynchronous:
+use `verifyWebhookAsync` and `parseWebhookAsync` there. They take the same arguments, return a promise, and use
+`crypto.subtle`, which every runtime has; read the body with `await request.arrayBuffer()`.
+
+```ts
+// a Cloudflare Worker
+const event = await parseWebhookAsync(env.ENRICHEDNOW_WEBHOOK_SECRET, request.headers.get('X-Webhook-Timestamp'),
+  await request.arrayBuffer(), request.headers.get('X-Webhook-Signature'));
+```
 
 An event can arrive more than once, and is sent again when you resend a delivery; `event.id` is the same every
 time, so use it to ignore a repeat. Answer with a 2xx quickly and do the work afterwards.
