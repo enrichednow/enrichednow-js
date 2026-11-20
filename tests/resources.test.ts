@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Company, Posting, PostingDetail, ScraperDetail, Usage } from '../src';
+import { unitCost } from '../src';
+import type { Company, Posting, PostingDetail, Scraper, ScraperDetail, Usage } from '../src';
 import { json, makeClient, makeRun, mockFetch } from './helpers';
 
 const scraper = {
@@ -10,6 +11,8 @@ const scraper = {
   summary: 'The openings of one board.',
   mode: 'job',
   billing_unit: 'request',
+  units_per_request: 5,
+  units_per_record: null,
   data_class: 'jobs',
   availability: 'public',
 } as const;
@@ -24,6 +27,16 @@ function request(mock: ReturnType<typeof mockFetch>, index = 0): string {
 }
 
 describe('scrapers', () => {
+  it('unitCost() is a run or a record by the billing unit, 1 when the API did not say', () => {
+    expect(unitCost(scraper)).toBe(5);
+    const byRecord: Scraper = { ...scraper, billing_unit: 'record', units_per_request: null, units_per_record: 4 };
+    expect(unitCost(byRecord)).toBe(4);
+    const { units_per_request: _a, units_per_record: _b, ...old } = scraper;
+    expect(unitCost(old)).toBe(1);
+    expect(unitCost({ ...old, billing_unit: 'record' })).toBe(1);
+    expect(unitCost({ ...scraper, units_per_request: null, units_per_record: 9 })).toBe(1);
+  });
+
   it('list() returns the catalogue as an array', async () => {
     const mock = mockFetch(json({ scrapers: [scraper] }));
     await expect(makeClient(mock.fetch).scrapers.list()).resolves.toEqual([scraper]);

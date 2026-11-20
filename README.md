@@ -158,6 +158,15 @@ const scraper = await client.scrapers.get('ats.board'); // with input_schema and
 const run = await client.scrapers.run('ats.board', input, { wait: 60 });
 ```
 
+What a scraper costs is `units_per_request` for one billed per request, `units_per_record` (each record) for one
+billed per record; `unitCost(scraper)` reads the right one. A run carries the same two, fixed when it started.
+
+```ts
+import { unitCost } from 'enrichednow';
+
+console.log(`${scraper.id}: ${unitCost(scraper)} unit(s) a ${scraper.billing_unit}`);
+```
+
 ### Runs
 
 ```ts

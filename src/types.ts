@@ -28,8 +28,12 @@ export interface Scraper {
   title: string;
   summary: string;
   mode: 'sync' | 'job';
-  /** What a charged run costs: one unit a `request`, or one unit a `record`. */
+  /** How a charged run is counted: by the `request` (the run), or by the `record`. */
   billing_unit: 'request' | 'record';
+  /** For a scraper billed per request: the units a run that ends `ok` or `partial` costs; `null` otherwise. */
+  units_per_request?: number | null;
+  /** For a scraper billed per record: the units each record of a charged run costs; `null` otherwise. */
+  units_per_record?: number | null;
   data_class: string;
   availability: 'public' | 'internal';
 }
@@ -85,6 +89,10 @@ export interface Run<TInput = JSONObject> {
   record_count: number;
   /** Units charged: `0` until the run ends `ok` or `partial`. */
   units: number;
+  /** The run's rate, fixed when it started, for a scraper billed per request; `null` otherwise. */
+  units_per_request?: number | null;
+  /** The run's rate, fixed when it started, for a scraper billed per record: units a record; `null` otherwise. */
+  units_per_record?: number | null;
   /** What the run did; `null` until it ends. */
   diagnostics: RunDiagnostics | null;
   created_at: string;

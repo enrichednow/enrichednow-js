@@ -144,12 +144,18 @@ export class QuotaExceededError extends APIError {
   readonly usedUnits: number | undefined;
   /** The month's allowance. */
   readonly allowanceUnits: number | undefined;
+  /** When starting a run was refused: the top-up units left (`0`: spent too). */
+  readonly topupUnits: number | undefined;
+  /** When starting a run was refused: the least the run would have cost, its units a request, or a record for one. */
+  readonly unitsNeeded: number | undefined;
 
   constructor(message: string, init?: APIErrorInit) {
     super(message, init);
     this.name = 'QuotaExceededError';
     this.usedUnits = numberOrUndefined(this.details['used_units']);
     this.allowanceUnits = numberOrUndefined(this.details['allowance_units']);
+    this.topupUnits = numberOrUndefined(this.details['topup_units']);
+    this.unitsNeeded = numberOrUndefined(this.details['units_needed']);
   }
 }
 

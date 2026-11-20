@@ -1,6 +1,6 @@
 {
   "name": "enrichednow",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "The official JavaScript and TypeScript library for the EnrichedNow API",
   "license": "MIT",
   "author": "EnrichedNow",

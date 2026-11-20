@@ -72,6 +72,13 @@ describe('errors of the API', () => {
     const error = await thrownBy(apiError(402, 'quota_exceeded', "This month's units are used up.", { used_units: 1000, allowance_units: 1000 }));
     expect(error).toBeInstanceOf(QuotaExceededError);
     expect(error).toMatchObject({ status: 402, code: 'quota_exceeded', usedUnits: 1000, allowanceUnits: 1000 });
+    expect((error as QuotaExceededError).unitsNeeded).toBeUndefined();
+  });
+
+  it('402 quota_exceeded on starting a run says what the run needed and the top-up left', async () => {
+    const details = { used_units: 998, allowance_units: 1000, topup_units: 0, units_needed: 5 };
+    const error = await thrownBy(apiError(402, 'quota_exceeded', "This month's units are used up.", details));
+    expect(error).toMatchObject({ unitsNeeded: 5, topupUnits: 0 });
   });
 
   it('429 too_many_runs is a RateLimitError with the run counts', async () => {

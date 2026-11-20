@@ -42,7 +42,7 @@ export type { APIErrorInit } from './errors';
 
 export { Page, PagePromise, RecordsPage } from './pagination';
 
-export { Scrapers } from './resources/scrapers';
+export { Scrapers, unitCost } from './resources/scrapers';
 export type { RunStartOptions } from './resources/scrapers';
 export { Runs, isFailedStatus, isTerminalStatus } from './resources/runs';
 export type { RunGetOptions, RunWaitOptions } from './resources/runs';

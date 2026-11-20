@@ -379,6 +379,13 @@ describe('parseWebhook()', () => {
     expect(parseWebhook(SECRET, String(NOW), BODY.toString('utf8'), sign(SECRET, NOW, BODY)).id).toBe('evt_1');
   });
 
+  it("returns the run's rate as it ran", () => {
+    const run = makeRun('ok', { units_per_request: null, units_per_record: 3 });
+    const body = Buffer.from(JSON.stringify({ ...EVENT, data: { run } }));
+    const event = parseWebhook(SECRET, String(NOW), body, sign(SECRET, NOW, body));
+    expect([event.data.run.units_per_request, event.data.run.units_per_record]).toEqual([null, 3]);
+  });
+
   it('throws WebhookVerificationError for a request that does not verify', () => {
     const attempt = (): WebhookEvent => parseWebhook('whsec_other', String(NOW), BODY, sign(SECRET, NOW, BODY));
     expect(attempt).toThrow(WebhookVerificationError);

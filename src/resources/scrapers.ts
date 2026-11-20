@@ -24,6 +24,20 @@ export interface RunStartOptions extends RequestOptions {
   idempotencyKey?: string | undefined;
 }
 
+/**
+ * What a scraper costs, a run or a record by its billing unit: `units_per_request` for one billed per request,
+ * `units_per_record` (each record) for one billed per record. `1` when the API did not say.
+ *
+ * ```ts
+ * const scraper = await client.scrapers.get('ats.board');
+ * console.log(`${unitCost(scraper)} unit(s) a ${scraper.billing_unit}`);
+ * ```
+ */
+export function unitCost(scraper: Pick<Scraper, 'billing_unit' | 'units_per_request' | 'units_per_record'>): number {
+  const cost = scraper.billing_unit === 'record' ? scraper.units_per_record : scraper.units_per_request;
+  return cost ?? 1;
+}
+
 /** A key of our own for one call: a UUID where the runtime makes one, else random hex of the same length. */
 function newIdempotencyKey(): string {
   const made = globalThis.crypto?.randomUUID?.();
