@@ -74,7 +74,7 @@ export class APIError extends EnrichedNowError {
     };
 
     if (status === 401) return new AuthenticationError(message, init);
-    if (status === 402) return new QuotaExceededError(message, init);
+    if (status === 402) return code === 'limit_reached' ? new LimitReachedError(message, init) : new QuotaExceededError(message, init);
     if (status === 403) return new PermissionDeniedError(message, init);
     if (status === 404) return new NotFoundError(message, init);
     if (status === 409) return new ConflictError(message, init);
@@ -156,6 +156,29 @@ export class QuotaExceededError extends APIError {
     this.allowanceUnits = numberOrUndefined(this.details['allowance_units']);
     this.topupUnits = numberOrUndefined(this.details['topup_units']);
     this.unitsNeeded = numberOrUndefined(this.details['units_needed']);
+  }
+}
+
+/**
+ * `402 limit_reached`: the run would go past a spend limit the account set itself: its monthly limit (`scope`
+ * `'account'`) or the API key's (`scope` `'key'`, with `keyId`). Units may be left on the plan: raising the limit, in
+ * the console, is what helps. Nothing was created or charged. A {@link QuotaExceededError}, so code that catches that
+ * one catches this too.
+ */
+export class LimitReachedError extends QuotaExceededError {
+  /** `'account'` or `'key'`: whose limit was reached. */
+  readonly scope: string | undefined;
+  /** The API key whose limit was reached, when `scope` is `'key'`. */
+  readonly keyId: string | undefined;
+  /** The limit, in units a calendar month. */
+  readonly limitUnits: number | undefined;
+
+  constructor(message: string, init?: APIErrorInit) {
+    super(message, init);
+    this.name = 'LimitReachedError';
+    this.scope = typeof this.details['scope'] === 'string' ? this.details['scope'] : undefined;
+    this.keyId = typeof this.details['key_id'] === 'string' ? this.details['key_id'] : undefined;
+    this.limitUnits = numberOrUndefined(this.details['limit_units']);
   }
 }
 

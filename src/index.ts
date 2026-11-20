@@ -29,6 +29,7 @@ export {
   ConflictError,
   ValidationError,
   QuotaExceededError,
+  LimitReachedError,
   RateLimitError,
   ServerError,
   APIConnectionError,

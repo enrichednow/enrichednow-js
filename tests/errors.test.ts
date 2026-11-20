@@ -8,6 +8,7 @@ import {
   NotFoundError,
   PermissionDeniedError,
   QuotaExceededError,
+  LimitReachedError,
   RateLimitError,
   ServerError,
   ValidationError,
@@ -79,6 +80,17 @@ describe('errors of the API', () => {
     const details = { used_units: 998, allowance_units: 1000, topup_units: 0, units_needed: 5 };
     const error = await thrownBy(apiError(402, 'quota_exceeded', "This month's units are used up.", details));
     expect(error).toMatchObject({ unitsNeeded: 5, topupUnits: 0 });
+  });
+
+  it('402 limit_reached is a LimitReachedError, and still a QuotaExceededError for code that catches that', async () => {
+    const details = { scope: 'key', key_id: 'key_1', limit_units: 100, used_units: 100, units_needed: 1 };
+    const error = await thrownBy(apiError(402, 'limit_reached', "This API key's monthly limit of 100 units is reached.", details));
+    expect(error).toBeInstanceOf(LimitReachedError);
+    expect(error).toBeInstanceOf(QuotaExceededError);
+    expect(error).toMatchObject({ name: 'LimitReachedError', status: 402, code: 'limit_reached', scope: 'key', keyId: 'key_1', limitUnits: 100, usedUnits: 100, unitsNeeded: 1 });
+    const account = await thrownBy(apiError(402, 'limit_reached', 'The spend limit is reached.', { scope: 'account', limit_units: 5 }));
+    expect(account).toMatchObject({ scope: 'account', keyId: undefined, limitUnits: 5 });
+    expect(await thrownBy(apiError(402, 'quota_exceeded', 'Used up.', {}))).not.toBeInstanceOf(LimitReachedError);
   });
 
   it('429 too_many_runs is a RateLimitError with the run counts', async () => {

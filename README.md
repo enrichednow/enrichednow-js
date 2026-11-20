@@ -429,6 +429,7 @@ person; its wording can change), `details`, `headers`, `body`, and `requestId` w
 | --- | --- | --- | --- |
 | `AuthenticationError` | 401 | `unauthorized` | |
 | `QuotaExceededError` | 402 | `quota_exceeded` | `usedUnits`, `allowanceUnits` |
+| `LimitReachedError` | 402 | `limit_reached` | A spend limit of the account's own, or of the key: `scope` (`account` or `key`), `keyId`, `limitUnits`, `usedUnits`, `unitsNeeded`. Extends `QuotaExceededError`. |
 | `PermissionDeniedError` | 403 | `forbidden` | `reason` — `email_not_verified` when the account must confirm its email address first |
 | `NotFoundError` | 404 | `not_found` | |
 | `ValidationError` | 422 | `invalid_input` | `fields`: `{ path, message }[]` |
