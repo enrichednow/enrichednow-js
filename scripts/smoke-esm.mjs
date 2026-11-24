@@ -2,12 +2,24 @@
 // Run `pnpm build` first.
 import assert from 'node:assert/strict';
 
-import EnrichedNow, { APIError, EnrichedNow as Named, PagePromise, RunFailedError, VERSION, parseWebhook, verifyWebhook } from 'enrichednow';
+import EnrichedNow, {
+  APIError,
+  EnrichedNow as Named,
+  FORMULA_IDS,
+  FormulaRunFailedError,
+  PagePromise,
+  RunFailedError,
+  VERSION,
+  parseWebhook,
+  verifyWebhook,
+} from 'enrichednow';
 
 assert.equal(EnrichedNow, Named);
 assert.equal(typeof VERSION, 'string');
 assert.ok(RunFailedError.prototype instanceof Error);
 assert.ok(APIError.prototype instanceof Error);
+assert.ok(FormulaRunFailedError.prototype instanceof RunFailedError);
+assert.ok(FORMULA_IDS.includes('job-order-hunter'));
 
 // A webhook request signed with Node's own crypto verifies with the built package.
 const { createHmac } = await import('node:crypto');
@@ -30,5 +42,7 @@ assert.deepEqual(await client.health(), { status: 'ok' });
 assert.deepEqual(calls, [['https://api.enrichednow.com/v1/health', `enrichednow-js/${VERSION}`]]);
 assert.ok(client.runs.records('run_1') instanceof PagePromise);
 assert.ok(client.webhooks.deliveries.list() instanceof PagePromise);
+assert.ok(client.formulaRuns.rows('frun_1') instanceof PagePromise);
+assert.ok(client.savedFormulas.list() instanceof PagePromise);
 
 console.log(`esm ok: enrichednow ${VERSION}`);

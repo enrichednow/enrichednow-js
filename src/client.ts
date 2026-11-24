@@ -4,18 +4,23 @@ import {
   APIError,
   APIUserAbortError,
   EnrichedNowError,
+  FormulaRunFailedError,
   RunFailedError,
   retryAfterMs,
 } from './errors';
-import { DEFAULT_BASE_URL, DEFAULT_MAX_RETRIES, DEFAULT_RUN_TIMEOUT, DEFAULT_TIMEOUT, sleep } from './internal';
+import type { FormulaParams } from './formula-params';
+import { DEFAULT_BASE_URL, DEFAULT_MAX_RETRIES, DEFAULT_RUN_TIMEOUT, DEFAULT_TIMEOUT, given, sleep } from './internal';
 import type { PagePromise, RecordsPage } from './pagination';
 import { Data } from './resources/data';
+import { Attestations, FormulaRows, FormulaRuns, Formulas, pollFormulaRun } from './resources/formulas';
 import { Runs, isFailedStatus, isTerminalStatus, pollRun } from './resources/runs';
+import { SavedFormulas } from './resources/saved-formulas';
 import { Scrapers } from './resources/scrapers';
 import type { RunStartOptions } from './resources/scrapers';
+import { Suppressions } from './resources/suppressions';
 import { UsageResource } from './resources/usage';
 import { Webhooks } from './resources/webhooks';
-import type { Health, JSONObject, Run, Standing } from './types';
+import type { FormulaRow, FormulaRowFilterParams, FormulaRowView, FormulaRun, Health, JSONObject, RecordFormat, Run, Standing } from './types';
 import { VERSION } from './version';
 
 const INITIAL_RETRY_DELAY = 500;
@@ -65,6 +70,8 @@ export interface RequestSpec extends RequestOptions {
   query?: Record<string, unknown> | undefined;
   /** Sent as JSON. */
   body?: unknown;
+  /** Sent as it is, instead of `body`, with the `content-type` given in `headers`: a CSV file, say. */
+  rawBody?: string | Uint8Array | undefined;
   /**
    * Whether sending the request twice does the same as sending it once. A request that is not idempotent is retried
    * only when the API refused it with `429`, which says nothing was done. Default: `true` for `GET`, `false` otherwise.
@@ -106,6 +113,55 @@ export interface ScrapeResult<TRecord = JSONObject, TInput = JSONObject> {
   records: PagePromise<TRecord, RecordsPage<TRecord>>;
 }
 
+export interface RunFormulaOptions extends Omit<RequestOptions, 'timeout'>, FormulaRowFilterParams {
+  /** A preview: at most 10 rows and 50 units, charged as usual; nothing is remembered as delivered. */
+  preview?: boolean | undefined;
+  /** The most the run may spend. It cannot be overspent: at the cap it stops and ends `partial`. Default: the formula's. */
+  unitCap?: number | undefined;
+  /** The most rows it may produce. Default: `max_results`, or the formula's. */
+  rowCap?: number | undefined;
+  /**
+   * Milliseconds to wait for the run to end, in all. Default 600 000. Past it, {@link RunTimeoutError} is thrown, with
+   * the run; the run carries on.
+   */
+  timeout?: number | undefined;
+  /** Milliseconds between two looks at a run that is still going, when the API answers sooner. Default 2 000. */
+  pollInterval?: number | undefined;
+  /** Throw {@link FormulaRunFailedError} when the run ends `failed`, `unsupported` or `cancelled`. Default `true`. */
+  throwOnFailure?: boolean | undefined;
+  /** Names this call so that it can be repeated without a second run: see {@link FormulaRunStartOptions.idempotencyKey}. */
+  idempotencyKey?: string | undefined;
+  /** `company`: the rows one per company, for a formula that has a `company_view`. */
+  view?: FormulaRowView | undefined;
+  /** Rows per page when the rows are read or exported: 1 to 1000. Default 1000. */
+  pageSize?: number | undefined;
+}
+
+/** How the rows of a formula run are narrowed for an export: as {@link RunFormulaOptions} narrowed them, unless given. */
+export interface FormulaExportOptions extends FormulaRowFilterParams {
+  view?: FormulaRowView | undefined;
+}
+
+export interface FormulaResult<TData = JSONObject> {
+  /** The run as it ended. */
+  run: FormulaRun;
+  /**
+   * The run's rows, best first, every page. Not fetched until used: iterate with `for await`, collect with
+   * `rows.toArray()`, or `await` it for the first page.
+   */
+  rows: PagePromise<FormulaRow<TData>>;
+  /**
+   * Every row of the run written by the API as `csv` or `ndjson`, page by page: write the pieces one after the other
+   * and the result is one file (a CSV has its header row once).
+   *
+   * ```ts
+   * const out = fs.createWriteStream('rows.csv');
+   * for await (const chunk of result.export('csv')) out.write(chunk);
+   * ```
+   */
+  export(format: RecordFormat, options?: FormulaExportOptions): AsyncGenerator<Uint8Array>;
+}
+
 /**
  * The EnrichedNow API client.
  *
@@ -133,6 +189,18 @@ export class EnrichedNow {
   readonly data: Data;
   /** Webhooks: the endpoints told when a run ends, their signing secrets, and the delivery log. */
   readonly webhooks: Webhooks;
+  /** The catalogue of formulas, what a run would cost, and starting one. */
+  readonly formulas: Formulas;
+  /** Formula runs: reading, listing, waiting for, cancelling, and their rows. */
+  readonly formulaRuns: FormulaRuns;
+  /** Saved formulas: a formula with its parameters, kept to run again by hand or on a schedule. */
+  readonly savedFormulas: SavedFormulas;
+  /** The suppression list: companies and addresses that formula runs leave out and that are never sent anywhere. */
+  readonly suppressions: Suppressions;
+  /** The terms some formulas need accepted, and whether the account has. */
+  readonly attestations: Attestations;
+  /** Feedback on a formula's rows. */
+  readonly formulaRows: FormulaRows;
 
   private readonly fetchImpl: Fetch;
   private readonly defaultHeaders: HeadersInput;
@@ -181,6 +249,12 @@ export class EnrichedNow {
     this.usage = new UsageResource(this);
     this.data = new Data(this);
     this.webhooks = new Webhooks(this);
+    this.formulas = new Formulas(this);
+    this.formulaRuns = new FormulaRuns(this);
+    this.savedFormulas = new SavedFormulas(this);
+    this.suppressions = new Suppressions(this);
+    this.attestations = new Attestations(this);
+    this.formulaRows = new FormulaRows(this);
   }
 
   /**
@@ -222,6 +296,64 @@ export class EnrichedNow {
     return { run, records };
   }
 
+  /**
+   * Run a formula and wait for it to end: start the run, wait for a final status, and hand back the run with its rows.
+   *
+   * A run that ends `failed`, `unsupported` or `cancelled` throws {@link FormulaRunFailedError} — pass
+   * `throwOnFailure: false` to get the run back instead. A run that ends `partial` is returned: it has rows, and
+   * `run.reason` and `run.reasons` say what is missing.
+   *
+   * ```ts
+   * const { run, rows } = await client.runFormula('job-order-hunter', {
+   *   job_titles: ['Java Developer'],
+   *   locations: ['London'],
+   * });
+   * for await (const row of rows) console.log(row.data.company_name, row.data.contact_email);
+   * ```
+   *
+   * @typeParam F - The formula's id. For a formula this library knows, `params` has its own type.
+   * @typeParam TData - The shape of a row's `data`: the formula's columns.
+   */
+  async runFormula<F extends string, TData = JSONObject>(
+    formulaId: F,
+    params: FormulaParams<F>,
+    options: RunFormulaOptions = {},
+  ): Promise<FormulaResult<TData>> {
+    const {
+      preview,
+      unitCap,
+      rowCap,
+      timeout = DEFAULT_RUN_TIMEOUT,
+      pollInterval,
+      throwOnFailure = true,
+      idempotencyKey,
+      fields,
+      minScore,
+      view,
+      pageSize = 1000,
+      ...request
+    } = options;
+    const sent = Date.now();
+    const deadline = sent + timeout;
+    const hold = Math.max(0, Math.min(60, timeout / 1000));
+
+    let run = await this.formulas.run(formulaId, params, { ...request, preview, unitCap, rowCap, idempotencyKey, wait: hold });
+    if (!isTerminalStatus(run.status)) {
+      run = await pollFormulaRun(this, run.id, { deadline, timeout, pollInterval, last: run, lastSent: sent, ...request });
+    }
+    if (throwOnFailure && isFailedStatus(run.status)) {
+      throw new FormulaRunFailedError(run);
+    }
+    const narrow = { fields, minScore, view };
+    const ended = run;
+    return {
+      run: ended,
+      rows: this.formulaRuns.rows<TData>(ended.id, { ...narrow, limit: pageSize }, request),
+      export: (format, more = {}) =>
+        this.formulaRuns.exportAll(ended.id, { ...narrow, ...given({ ...more }), limit: pageSize, format }, request),
+    };
+  }
+
   /** Whether the service is up. */
   health(options?: RequestOptions): Promise<Health> {
     return this.request<Health>({ method: 'GET', path: '/v1/health', ...options });
@@ -261,8 +393,9 @@ export class EnrichedNow {
     const timeout = spec.timeout ?? this.timeout;
     const idempotent = spec.idempotent ?? method === 'GET';
     const url = this.buildURL(path, query);
-    const headers = this.buildHeaders(body !== undefined, spec.headers);
-    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const asJSON = spec.rawBody === undefined && body !== undefined;
+    const headers = this.buildHeaders(asJSON, spec.headers);
+    const payload = spec.rawBody ?? (asJSON ? JSON.stringify(body) : undefined);
 
     for (let attempt = 0; ; attempt++) {
       if (signal?.aborted) throw new APIUserAbortError();
@@ -280,7 +413,8 @@ export class EnrichedNow {
       let bytes: Uint8Array;
       try {
         const init: RequestInit = { method, headers, signal: controller.signal };
-        if (payload !== undefined) init.body = payload;
+        // A Uint8Array is a body to every fetch; the DOM types of TypeScript 5.7 and later want one over an ArrayBuffer.
+        if (payload !== undefined) init.body = payload as BodyInit;
         response = await this.fetchImpl(url, init);
         bytes = new Uint8Array(await response.arrayBuffer());
       } catch (cause) {

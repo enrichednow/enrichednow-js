@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/enrichednow/enrichednow-js/actions/workflows/ci.yml/badge.svg)](https://github.com/enrichednow/enrichednow-js/actions/workflows/ci.yml)
 
-The official library for the [EnrichedNow API](https://docs.enrichednow.com): run scrapers, read their records, and
-query the job-postings datasets, from Node, Bun, Deno and edge runtimes.
+The official library for the [EnrichedNow API](https://docs.enrichednow.com): run scrapers and formulas, read their
+records and rows, and query the job-postings datasets, from Node, Bun, Deno and edge runtimes.
 
 - Zero dependencies. Uses the runtime's own `fetch`.
 - Written in TypeScript: every request and response is typed.
@@ -147,6 +147,195 @@ const records = await client.runs.records(run.id).toArray();
 ```
 
 `runs.wait()` returns the run whatever its final status; it does not throw for a failed run.
+
+## Formulas
+
+A formula is a ready-made recipe: give it a few parameters and it does the searching, matching and checking, and hands
+back a finished, deduplicated list of rows, best first. A run spends units, and never more than its unit cap.
+
+### In one call
+
+```ts
+const { run, rows } = await client.runFormula('job-order-hunter', {
+  job_titles: ['Java Developer'],
+  locations: ['London'],
+});
+
+console.log(run.status, run.rows_total, run.units_spent);
+
+for await (const row of rows) {
+  console.log(row.score, row.data.company_name, row.data.contact_email);
+}
+```
+
+`runFormula()` starts a run, waits for it to end, and hands back the run with its rows. The rows are fetched as you
+iterate, a thousand a page; `await rows.toArray()` collects them all. The whole run as one file:
+
+```ts
+import { writeFile } from 'node:fs/promises';
+
+const result = await client.runFormula('job-order-hunter', params);
+await writeFile('job-orders.csv', result.export('csv')); // or 'ndjson'; a CSV has its header row once
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `preview` | `false` | At most 10 rows and 50 units, charged as usual; nothing is remembered as delivered. |
+| `unitCap` | the formula's | The most the run may spend. At the cap it stops, keeps what it has and ends `partial`. |
+| `rowCap` | the formula's | The most rows it may produce. |
+| `timeout` | `600_000` | Milliseconds to wait for the run to end, in all. |
+| `pollInterval` | `2_000` | Milliseconds between two looks at a run that is still going, when the API answers sooner. |
+| `throwOnFailure` | `true` | Throw `FormulaRunFailedError` when the run ends `failed`, `unsupported` or `cancelled`. |
+| `fields`, `minScore`, `view` | | Only these columns; only rows scored at least this; `view: 'company'` for one row per company. |
+| `pageSize` | `1000` | Rows per page when the rows are read or exported (1 to 1000). |
+| `idempotencyKey` | | Names this call so that it can be repeated without a second run. See [Retries](#retries). |
+| `signal`, `maxRetries`, `headers` | | As for every request. |
+
+| The run ended | `runFormula()` |
+| --- | --- |
+| `ok` | Returns `{ run, rows, export }`. |
+| `partial` | Returns `{ run, rows, export }`. There are rows; `run.reason` and `run.reasons` say what is missing (`unit_cap_reached`, `contacts_not_connected`, `source_failed:<source>`, …). |
+| `failed`, `unsupported`, `cancelled` | Throws `FormulaRunFailedError`, with `status`, `reason` and the `run`. |
+| still going after `timeout` | Throws `RunTimeoutError`, with the `run`. The run carries on. |
+
+### Typed parameters
+
+Each formula this version of the library knows has a type for its parameters, and the id picks it: a missing or
+misspelt parameter does not compile. A formula without one takes any JSON object, so a formula added after this release
+works too.
+
+```ts
+import type { JobOrderHunterParams } from 'enrichednow';
+
+const params: JobOrderHunterParams = { job_titles: ['Java Developer'], locations: ['London'], posted_within_days: 2 };
+await client.runFormula('job-order-hunter', params);
+
+await client.runFormula('job-order-hunter', { locations: ['London'] }); // does not compile: job_titles is required
+await client.runFormula('a-newer-formula', { anything: 'goes' });     // no type: any object
+```
+
+The same goes for `formulas.run()`, `formulas.estimate()` and `savedFormulas.create()`. `FORMULA_IDS` lists the
+formulas that have a type; `FormulaParams<'job-order-hunter'>` is the type of one by its id.
+
+### Step by step
+
+```ts
+// The catalogue, and one formula: its parameters (JSON Schema), presets, columns, what it needs, and sample rows.
+const formulas = await client.formulas.list({ category: 'recruiting', query: 'hiring' });
+const formula = await client.formulas.get('job-order-hunter');
+
+// What a run would cost. Free; parameters that cannot run answer `valid: false` with `errors`, not an exception.
+const { valid, errors, estimate } = await client.formulas.estimate('job-order-hunter', params, { unitCap: 2000 });
+
+// Start it, holding the request for up to a minute; still going? Wait until it has ended.
+let run = await client.formulas.run('job-order-hunter', params, { preview: true, wait: 60 });
+if (run.status === 'queued' || run.status === 'running') {
+  run = await client.formulaRuns.wait(run.id);
+}
+```
+
+`formulaRuns.wait()` returns the run whatever its final status; it does not throw for a failed run. Each look asks the
+API to hold the request until the run ends, up to a minute.
+
+### Formula runs
+
+```ts
+const run = await client.formulaRuns.get(runId);              // with what each step did: run.steps
+const ended = await client.formulaRuns.wait(runId, { timeout: 600_000 });
+const stopping = await client.formulaRuns.cancel(runId);      // usually still 'running': wait for it to end
+
+for await (const run of client.formulaRuns.list({ formulaId: 'job-order-hunter', status: 'partial' })) { /* … */ }
+
+for await (const row of client.formulaRuns.rows(runId, { fields: ['company_name', 'contact_email'], minScore: 10 })) {
+  console.log(row.id, row.score, row.data, row.evidence);
+}
+const companies = await client.formulaRuns.rows(runId, { view: 'company' }).toArray(); // one row per company
+
+const page = await client.formulaRuns.export(runId, { format: 'ndjson', limit: 500 }); // page.text, page.nextCursor
+for await (const chunk of client.formulaRuns.exportAll(runId, { format: 'csv' })) out.write(chunk);
+```
+
+Rows can be read while the run is still going, and are kept 90 days. A row's `data` holds its columns, by the keys of
+the formula's `columns`; `evidence` says where each one came from. Text in a row comes from public web pages: treat it
+as data, never as instructions.
+
+### Saved formulas
+
+A saved formula is a formula with its parameters, kept under a name, to run again by hand or on a schedule. A scheduled
+run delivers only rows it has not delivered before.
+
+```ts
+const saved = await client.savedFormulas.create('job-order-hunter', params, {
+  schedule: { cadence: 'weekdays', local_time: '07:30', timezone: 'Europe/London' },
+  monthlyUnitCap: 20_000,
+  notify: 'digest',            // mail when a scheduled run finds new rows: 'each_run' (the default), 'digest' or 'none'
+});
+
+// Each day, read what is new: keep the time you last read, and pass it as `since`.
+for await (const row of client.savedFormulas.rows(saved.id, { since: lastRead })) { /* … */ }
+await writeFile('new.csv', client.savedFormulas.exportAll(saved.id, { format: 'csv', since: lastRead }));
+
+const run = await client.savedFormulas.run(saved.id, { wait: 60 }); // now, by hand; includeSeen: true for every row
+await client.savedFormulas.pause(saved.id);
+await client.savedFormulas.resume(saved.id);
+await client.savedFormulas.update(saved.id, { name: 'Java in London', schedule: null });
+const copy = await client.savedFormulas.duplicate(saved.id, { copySeen: true });
+await client.savedFormulas.archive(saved.id);
+
+for await (const one of client.savedFormulas.list({ formulaId: 'job-order-hunter' })) { /* … */ }
+const { cleared } = await client.savedFormulas.resetSeen(saved.id); // deliver everything again; owners and admins
+const history = await client.savedFormulas.snapshots(saved.id, { entityKey: 'https://example.com/jobs/1' });
+const { schedules, schedules_active, min_interval_minutes } = await client.savedFormulas.limits();
+```
+
+`schedule.cadence` is `hourly`, `daily`, `weekdays`, `weekly` (with `day_of_week`, 0 is Monday) or `monthly` (with
+`day_of_month`); `local_time` is `HH:MM` in `timezone`, an IANA time zone. `update()` changes only what it is given,
+and `null` removes:
+
+| `update()` | `undefined`, or left out | `null` |
+| --- | --- | --- |
+| `schedule` | kept | the schedule is removed |
+| `monthlyUnitCap` | kept | the monthly cap is removed |
+| `name` | kept | back to a name made from the parameters, which follows them |
+
+An update with nothing in it throws a `TypeError` before anything is sent. To give `params` its formula's type, name
+the formula: `client.savedFormulas.update<'job-order-hunter'>(saved.id, { params })`.
+
+### Suppressions
+
+Companies (by domain or by name) and addresses on the suppression list are left out of every formula run, before any
+paid step, and never sent anywhere.
+
+```ts
+import { readFile } from 'node:fs/promises';
+
+const added = await client.suppressions.add([
+  { kind: 'domain', value: 'our-client.example' },
+  { kind: 'email', value: 'ana@initech.example' },
+  { kind: 'company_name', value: 'Umbrella, Inc.' },
+]);
+
+// A CSV file: with a `kind,value` header, or one column of values (pass `kind`, or each is guessed).
+const { added: fromFile, already, invalid } = await client.suppressions.upload(await readFile('do-not-contact.csv'));
+
+for await (const entry of client.suppressions.list({ kind: 'domain' })) console.log(entry.value);
+await client.suppressions.delete('domain', 'our-client.example');
+```
+
+`upload()` takes the file's text, its bytes, a `Blob`, or a stream of its pieces (`fs.createReadStream(path)`).
+
+### Row feedback, and the terms some formulas need
+
+```ts
+await client.formulaRows.feedback(row.id, 'wrong_company', { correctDomain: 'corvid.example' });
+// 'good', 'wrong_company', 'wrong_contact' or 'not_relevant'
+
+const attestations = await client.attestations.list(); // [{ kind: 'personal_data', accepted: true, … }]
+```
+
+`wrong_company` also corrects the match: this account's runs match that company to `correctDomain` from now on. A
+formula that returns people (`needs_attestation` on the formula) runs only once an owner or an admin of the account has
+accepted its terms, in the console; a key cannot accept them. Until then its runs throw `AttestationRequiredError`.
 
 ## Resources
 
@@ -357,7 +546,8 @@ const body = await client.request<MyShape>({ method: 'GET', path: '/v1/runs', qu
 ## Pagination
 
 Every list — `runs.list()`, `runs.records()`, `data.postings.list()`, `data.companies.list()`,
-`data.companies.postings()` — works the same way. Nothing is requested until you use it.
+`data.companies.postings()`, `formulaRuns.list()`, `formulaRuns.rows()`, `savedFormulas.list()`,
+`savedFormulas.rows()`, `suppressions.list()` — works the same way. Nothing is requested until you use it.
 
 Iterate every item; pages are fetched as they are needed, and a `break` stops fetching:
 
@@ -401,8 +591,9 @@ const next = await client.runs.records(runId, { cursor: savedCursor });
 Two different things can go wrong, and they are reported differently:
 
 - **The request failed** — the API answered with an error, or could not be reached. An `APIError` is thrown.
-- **The scrape failed** — the request worked, and the run ended `failed`, `unsupported` or `cancelled`.
-  `scrape()` throws `RunFailedError`; `runs.get()` and `runs.wait()` return the run for you to read.
+- **The run failed** — the request worked, and the run ended `failed`, `unsupported` or `cancelled`.
+  `scrape()` throws `RunFailedError` and `runFormula()` throws `FormulaRunFailedError`; `runs.get()`, `runs.wait()`,
+  `formulaRuns.get()` and `formulaRuns.wait()` return the run for you to read.
 
 ```ts
 import { APIError, RateLimitError, ValidationError } from 'enrichednow';
@@ -429,24 +620,47 @@ person; its wording can change), `details`, `headers`, `body`, and `requestId` w
 | --- | --- | --- | --- |
 | `AuthenticationError` | 401 | `unauthorized` | |
 | `QuotaExceededError` | 402 | `quota_exceeded` | `usedUnits`, `allowanceUnits` |
-| `LimitReachedError` | 402 | `limit_reached` | A spend limit of the account's own, or of the key: `scope` (`account` or `key`), `keyId`, `limitUnits`, `usedUnits`, `unitsNeeded`. Extends `QuotaExceededError`. |
+| `LimitReachedError` | 402 | `limit_reached` | A spend limit set on purpose: `scope` (`account`, `key`, `saved_formula` for a saved formula's monthly cap, or `formula_run`), `keyId`, `savedFormulaId`, `limitUnits`, `usedUnits`, `unitsNeeded`. Extends `QuotaExceededError`. |
 | `PermissionDeniedError` | 403 | `forbidden` | `reason` — `email_not_verified` when the account must confirm its email address first |
-| `NotFoundError` | 404 | `not_found` | |
-| `ValidationError` | 422 | `invalid_input` | `fields`: `{ path, message }[]` |
+| `PlanLimitReachedError` | 403 | `plan_limit_reached` | A saved formula asked for more than the plan allows: `limit` (`schedules`, `min_interval_minutes` or `destinations`), `allowed`, `current`, `asked`. Extends `PermissionDeniedError`. |
+| `NotFoundError` | 404 | `not_found`, `formula_not_found` | |
+| `ConflictError` | 409 | `idempotency_conflict` | The idempotency key was used for a different request; `details.run_id` is the run it started. |
+| `AttestationRequiredError` | 409 | `attestation_required` | The formula returns people, and its terms must be accepted in the console first: `kind`, `textVersion`. Extends `ConflictError`, as do the three below. |
+| `FormulaUnavailableError` | 409 | `formula_unavailable` | The formula cannot run now: `formulaStatus` (`deprecated`), or `formulaId` and `major` for a saved formula whose version is no longer offered. |
+| `RequirementMissingError` | 409 | `requirement_missing` | The account lacks what the formula needs: `missing` (`product:data`, a scraper id). |
+| `SavedFormulaArchivedError` | 409 | `saved_formula_archived` | The saved formula is archived: duplicate it to use it again. `savedFormulaId`. |
+| `ValidationError` | 422 | `invalid_input`, `unit_cap_too_low` | `fields`: `{ path, message }[]`; `minUnitCap`, the least unit cap the formula takes, for `unit_cap_too_low` |
 | `RateLimitError` | 429 | `too_many_runs`, `rate_limited` | `retryAfter` (seconds), `activeRuns`, `maxConcurrentRuns` |
 | `ServerError` | 5xx | `internal`, `data_unavailable` | |
 | `APIConnectionError` | — | — | The API could not be reached; `cause` has the reason. |
 | `APIConnectionTimeoutError` | — | — | The request took longer than `timeout`. Extends `APIConnectionError`. |
 | `APIUserAbortError` | — | — | You aborted the request through its `signal`. |
 
-All of these extend `APIError`, which extends `EnrichedNowError`. Three errors are not about a request and extend
-`EnrichedNowError` directly:
+All of these extend `APIError`, which extends `EnrichedNowError`. These errors are not about a request and extend
+`EnrichedNowError`:
 
 | Class | When | Carries |
 | --- | --- | --- |
 | `RunFailedError` | A run ended `failed`, `unsupported` or `cancelled` (thrown by `scrape()`). | `status`, `reason`, `runId`, `run` |
-| `RunTimeoutError` | A run was still going after the `timeout` of `scrape()` or `runs.wait()`. | `runId`, `run` |
+| `FormulaRunFailedError` | A formula run ended `failed`, `unsupported` or `cancelled` (thrown by `runFormula()`). Extends `RunFailedError`. | `status`, `reason`, `runId`, `formulaId`, `run` |
+| `RunTimeoutError` | A run was still going after the `timeout` of `scrape()`, `runs.wait()`, `runFormula()` or `formulaRuns.wait()`. | `runId`, `run` (a scraper's run or a formula's) |
 | `WebhookVerificationError` | A webhook request did not verify (thrown by `parseWebhook()`). | |
+
+```ts
+import { AttestationRequiredError, FormulaRunFailedError, PlanLimitReachedError } from 'enrichednow';
+
+try {
+  await client.runFormula('job-order-hunter', params);
+} catch (error) {
+  if (error instanceof AttestationRequiredError) {
+    console.log(`Accept the ${error.kind} terms in the console first (version ${error.textVersion}).`);
+  } else if (error instanceof FormulaRunFailedError) {
+    console.log(error.status, error.reason, error.run.reasons);
+  } else {
+    throw error;
+  }
+}
+```
 
 ## Retries
 
@@ -466,8 +680,14 @@ attempt started and never a second one. To make a call of your own repeatable (a
 pass your own key: `client.scrape('ats.board', input, { idempotencyKey: 'import-2026-11-19-acme' })`. For 24 hours
 the same key with the same request gives the same run; the same key with a different request throws `ConflictError`.
 
-`webhooks.create()` and `webhooks.deliveries.resend()` are the exception: they are not sent again after a connection
-error, a timeout or a `5xx`, because a repeat would add a second endpoint, or queue the delivery twice.
+Starting a formula run is the same: `formulas.run()`, `savedFormulas.run()` and `runFormula()` send an
+`Idempotency-Key`, and take `idempotencyKey`. These are safe to repeat as they are, and are retried: an estimate,
+cancelling a formula run, changing, pausing, resuming or archiving a saved formula, adding to the suppression list or
+removing from it, and row feedback.
+
+`webhooks.create()`, `webhooks.deliveries.resend()`, `savedFormulas.create()`, `savedFormulas.duplicate()`,
+`savedFormulas.resetSeen()` and `suppressions.upload()` are the exception: they are not sent again after a connection
+error, a timeout or a `5xx`, because a repeat would add a second endpoint or saved formula, or do the work twice.
 
 ```ts
 const client = new EnrichedNow({ maxRetries: 5 });
@@ -480,8 +700,8 @@ await client.runs.get(runId, { maxRetries: 0 });
 `APIConnectionTimeoutError` (after its retries). A request that starts a run with `wait` is given at least `wait`
 plus 30 seconds.
 
-Pass an `AbortSignal` to stop a request, a `runs.wait()`, a `scrape()` or an iteration — including the pauses
-between attempts and polls. It throws `APIUserAbortError`.
+Pass an `AbortSignal` to stop a request, a `runs.wait()`, a `scrape()`, a `formulaRuns.wait()`, a `runFormula()` or
+an iteration — including the pauses between attempts and polls. It throws `APIUserAbortError`.
 
 ```ts
 const controller = new AbortController();
@@ -490,14 +710,15 @@ setTimeout(() => controller.abort(), 30_000);
 const { run } = await client.scrape('careers.company', { domain: 'acme.com' }, { signal: controller.signal });
 ```
 
-Aborting stops the waiting, not the run. To stop the run, call `client.runs.cancel(runId)`.
+Aborting stops the waiting, not the run. To stop the run, call `client.runs.cancel(runId)` (or
+`client.formulaRuns.cancel(runId)`).
 
 ## TypeScript
 
 Every response type is exported, with the API's own field names:
 
 ```ts
-import type { Run, Scraper, Posting, Company, Usage, RunStatus } from 'enrichednow';
+import type { Run, Scraper, Posting, Company, Usage, RunStatus, Formula, FormulaRun, FormulaRow, SavedFormula } from 'enrichednow';
 ```
 
 What a scraper takes and returns depends on the scraper, so runs and records are generic. Records are
@@ -530,6 +751,24 @@ const page = await client.runs.records<Job>(run.id); // RecordsPage<Job>
 Each scraper's `input_schema` and `record_schema` — from `client.scrapers.get(id)` or its page in the docs — say
 what the shapes are.
 
+A formula's parameters are typed by its id (see [Typed parameters](#typed-parameters)). Its rows are
+`FormulaRow<Record<string, unknown>>` unless you say what their `data` is:
+
+```ts
+interface JobOrder {
+  company_name: string;
+  contact_email: string | null;
+}
+
+for await (const row of client.formulaRuns.rows<JobOrder>(run.id)) {
+  row.data.contact_email;            // string | null
+}
+
+const { rows } = await client.runFormula<'job-order-hunter', JobOrder>('job-order-hunter', params);
+```
+
+A formula's `columns` — from `client.formulas.get(id)` — name the keys of `data`.
+
 ## Requirements
 
 Node 18+, Bun, Deno, Cloudflare Workers, Vercel Edge and other runtimes with a global `fetch`. For anything else,
@@ -546,7 +785,8 @@ pnpm smoke           # import and require the built package
 pnpm check           # all four
 ```
 
-The tests run against a mocked `fetch` and make no network calls.
+The tests run against a mocked `fetch` and make no network calls. The formula tests answer with exchanges recorded
+from the API, in `tests/fixtures/formulas/`. `examples/formulas.ts` is type-checked with the rest.
 
 ## Licence
 

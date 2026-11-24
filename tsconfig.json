@@ -14,7 +14,10 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "enrichednow": ["./src/index.ts"]
+    }
   },
-  "include": ["src", "tests", "tsup.config.ts"]
+  "include": ["src", "tests", "examples", "tsup.config.ts"]
 }

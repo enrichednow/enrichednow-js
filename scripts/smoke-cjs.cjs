@@ -3,12 +3,14 @@
 const assert = require('node:assert/strict');
 
 const sdk = require('enrichednow');
-const { EnrichedNow, APIError, PagePromise, RunFailedError, VERSION, parseWebhook, verifyWebhook } = sdk;
+const { EnrichedNow, APIError, FORMULA_IDS, FormulaRunFailedError, PagePromise, RunFailedError, VERSION, parseWebhook, verifyWebhook } = sdk;
 
 assert.equal(sdk.default, EnrichedNow);
 assert.equal(typeof VERSION, 'string');
 assert.ok(RunFailedError.prototype instanceof Error);
 assert.ok(APIError.prototype instanceof Error);
+assert.ok(FormulaRunFailedError.prototype instanceof RunFailedError);
+assert.ok(FORMULA_IDS.includes('job-order-hunter'));
 
 // A webhook request signed with Node's own crypto verifies with the built package.
 const { createHmac } = require('node:crypto');
@@ -33,5 +35,7 @@ client.health().then((health) => {
   assert.deepEqual(calls, [['https://api.enrichednow.com/v1/health', `enrichednow-js/${VERSION}`]]);
   assert.ok(client.runs.records('run_1') instanceof PagePromise);
   assert.ok(client.webhooks.deliveries.list() instanceof PagePromise);
+  assert.ok(client.formulaRuns.rows('frun_1') instanceof PagePromise);
+  assert.ok(client.savedFormulas.list() instanceof PagePromise);
   console.log(`cjs ok: enrichednow ${VERSION}`);
 });

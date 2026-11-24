@@ -1,16 +1,37 @@
 import { describe, expectTypeOf, it } from 'vitest';
 
-import { parseWebhook, verifyWebhook } from '../src';
+import { FORMULA_IDS, parseWebhook, verifyWebhook } from '../src';
 import type {
+  Attestation,
   Company,
+  Formula,
+  FormulaDetail,
+  FormulaEstimate,
+  FormulaId,
+  FormulaParams,
+  FormulaRow,
+  FormulaRun,
+  FormulaRunFailedError,
+  JSONObject,
+  JobOrderHunterParams,
   Page,
   PagePromise,
+  PlanLimits,
   Posting,
   PostingDetail,
   RecordsPage,
+  RowFeedback,
+  RowsExport,
   Run,
+  RunFailedError,
+  RunTimeoutError,
+  SavedFormula,
   Scraper,
   ScraperDetail,
+  SeenReset,
+  Snapshot,
+  Suppression,
+  SuppressionUpload,
   Usage,
   WebhookDelivery,
   WebhookEndpoint,
@@ -100,5 +121,99 @@ describe('types', () => {
 
   it('records are JSON objects unless told otherwise', checked(() => {
     expectTypeOf(client.runs.records('run_1').toArray()).resolves.toEqualTypeOf<Record<string, unknown>[]>();
+  }));
+
+  it('formulas return the API shapes', checked(() => {
+    expectTypeOf(client.formulas.list()).resolves.toEqualTypeOf<Formula[]>();
+    expectTypeOf(client.formulas.get('job-order-hunter')).resolves.toEqualTypeOf<FormulaDetail>();
+    expectTypeOf(client.formulas.estimate('a-formula', {})).resolves.toEqualTypeOf<FormulaEstimate>();
+    expectTypeOf(client.formulas.run('a-formula', {})).resolves.toEqualTypeOf<FormulaRun>();
+    expectTypeOf(client.formulaRuns.list()).toEqualTypeOf<PagePromise<FormulaRun>>();
+    expectTypeOf(client.formulaRuns.get('frun_1', { wait: 60 })).resolves.toEqualTypeOf<FormulaRun>();
+    expectTypeOf(client.formulaRuns.wait('frun_1')).resolves.toEqualTypeOf<FormulaRun>();
+    expectTypeOf(client.formulaRuns.cancel('frun_1')).resolves.toEqualTypeOf<FormulaRun>();
+    expectTypeOf(client.formulaRuns.rows('frun_1')).toEqualTypeOf<PagePromise<FormulaRow>>();
+    expectTypeOf(client.formulaRuns.export('frun_1', { format: 'csv' })).resolves.toEqualTypeOf<RowsExport>();
+    expectTypeOf(client.formulaRuns.exportAll('frun_1', { format: 'ndjson' })).toEqualTypeOf<AsyncGenerator<Uint8Array>>();
+    expectTypeOf(client.savedFormulas.create('a-formula', {})).resolves.toEqualTypeOf<SavedFormula>();
+    expectTypeOf(client.savedFormulas.list()).toEqualTypeOf<PagePromise<SavedFormula>>();
+    expectTypeOf(client.savedFormulas.get('sf_1')).resolves.toEqualTypeOf<SavedFormula>();
+    expectTypeOf(client.savedFormulas.update('sf_1', { notify: 'none' })).resolves.toEqualTypeOf<SavedFormula>();
+    expectTypeOf(client.savedFormulas.archive('sf_1')).resolves.toEqualTypeOf<SavedFormula>();
+    expectTypeOf(client.savedFormulas.duplicate('sf_1')).resolves.toEqualTypeOf<SavedFormula>();
+    expectTypeOf(client.savedFormulas.run('sf_1')).resolves.toEqualTypeOf<FormulaRun>();
+    expectTypeOf(client.savedFormulas.pause('sf_1')).resolves.toEqualTypeOf<SavedFormula>();
+    expectTypeOf(client.savedFormulas.resume('sf_1')).resolves.toEqualTypeOf<SavedFormula>();
+    expectTypeOf(client.savedFormulas.resetSeen('sf_1')).resolves.toEqualTypeOf<SeenReset>();
+    expectTypeOf(client.savedFormulas.rows('sf_1', { since: new Date() })).toEqualTypeOf<PagePromise<FormulaRow>>();
+    expectTypeOf(client.savedFormulas.snapshots('sf_1')).resolves.toEqualTypeOf<Snapshot[]>();
+    expectTypeOf(client.savedFormulas.limits()).resolves.toEqualTypeOf<PlanLimits>();
+    expectTypeOf(client.suppressions.list()).toEqualTypeOf<PagePromise<Suppression>>();
+    expectTypeOf(client.suppressions.add([{ kind: 'domain', value: 'acme.com' }])).resolves.toEqualTypeOf<number>();
+    expectTypeOf(client.suppressions.upload('acme.com\n')).resolves.toEqualTypeOf<SuppressionUpload>();
+    expectTypeOf(client.suppressions.delete('domain', 'acme.com')).resolves.toEqualTypeOf<void>();
+    expectTypeOf(client.attestations.list()).resolves.toEqualTypeOf<Attestation[]>();
+    expectTypeOf(client.formulaRows.feedback('frow_1', 'good')).resolves.toEqualTypeOf<RowFeedback>();
+    // @ts-expect-error a verdict that does not exist
+    void client.formulaRows.feedback('frow_1', 'bad');
+    // @ts-expect-error a kind that does not exist
+    void client.suppressions.add([{ kind: 'phone', value: '+44' }]);
+  }));
+
+  it('a formula this library knows checks its parameters; any other formula takes any JSON object', checked(() => {
+    void client.formulas.run('job-order-hunter', { job_titles: ['Java Developer'], locations: ['London'], company_size: { min: 11, max: 500 } });
+    // @ts-expect-error job_titles is required
+    void client.formulas.run('job-order-hunter', { locations: ['London'] });
+    // @ts-expect-error job_titles is a list
+    void client.formulas.run('job-order-hunter', { job_titles: 'Java Developer', locations: ['London'] });
+    // @ts-expect-error not a parameter of this formula
+    void client.formulas.run('job-order-hunter', { job_titles: ['Java'], locations: ['London'], titles: ['Java'] });
+    // @ts-expect-error not a board it searches
+    void client.formulas.estimate('job-order-hunter', { job_titles: ['Java'], locations: ['London'], sources: ['monster'] });
+    // @ts-expect-error the same check on runFormula()
+    void client.runFormula('job-order-hunter', { locations: ['London'] });
+    // @ts-expect-error and on saving one
+    void client.savedFormulas.create('job-order-hunter', { locations: ['London'] });
+    // @ts-expect-error and on changing one, given its formula
+    void client.savedFormulas.update<'job-order-hunter'>('sf_1', { params: { locations: ['London'] } });
+
+    void client.formulas.run('a-formula-from-next-month', { anything: 1, at: ['all'] });
+    void client.runFormula('a-formula-from-next-month', { anything: 1 });
+    void client.savedFormulas.update('sf_1', { params: { anything: 1 } });
+    const id: string = 'job-order-hunter';
+    void client.formulas.run(id, { anything: 1 });
+
+    expectTypeOf<FormulaParams<'job-order-hunter'>>().toEqualTypeOf<JobOrderHunterParams>();
+    expectTypeOf<FormulaParams<'a-formula-from-next-month'>>().toEqualTypeOf<JSONObject>();
+    expectTypeOf<FormulaParams<string>>().toEqualTypeOf<JSONObject>();
+    expectTypeOf(FORMULA_IDS).toEqualTypeOf<readonly FormulaId[]>();
+  }));
+
+  it('a change to a saved formula takes null where null removes something, and only there', checked(() => {
+    void client.savedFormulas.update('sf_1', { schedule: null, monthlyUnitCap: null, name: null });
+    // @ts-expect-error a unit cap is changed, not removed
+    void client.savedFormulas.update('sf_1', { unitCap: null });
+    // @ts-expect-error not a cadence
+    void client.savedFormulas.update('sf_1', { schedule: { cadence: 'yearly', local_time: '07:00', timezone: 'UTC' } });
+  }));
+
+  it('runFormula() and the rows carry the row type they are given', checked(() => {
+    interface Lead {
+      company_name: string;
+      contact_email: string | null;
+    }
+    const run = () => client.runFormula<'job-order-hunter', Lead>('job-order-hunter', { job_titles: ['Java'], locations: ['London'] });
+    expectTypeOf<Awaited<ReturnType<typeof run>>['run']>().toEqualTypeOf<FormulaRun>();
+    expectTypeOf<Awaited<ReturnType<typeof run>>['rows']>().toEqualTypeOf<PagePromise<FormulaRow<Lead>>>();
+    expectTypeOf(client.formulaRuns.rows<Lead>('frun_1').toArray()).resolves.toEqualTypeOf<FormulaRow<Lead>[]>();
+    expectTypeOf(client.savedFormulas.rows<Lead>('sf_1')).toEqualTypeOf<PagePromise<FormulaRow<Lead>>>();
+    expectTypeOf<Awaited<PagePromise<FormulaRow<Lead>>>>().toEqualTypeOf<Page<FormulaRow<Lead>>>();
+  }));
+
+  it('the errors about a run carry the run they are about', checked(() => {
+    expectTypeOf<RunFailedError['run']>().toEqualTypeOf<Run>();
+    expectTypeOf<RunTimeoutError['run']>().toEqualTypeOf<Run>();
+    expectTypeOf<FormulaRunFailedError['run']>().toEqualTypeOf<FormulaRun>();
+    expectTypeOf<RunTimeoutError<JSONObject, FormulaRun>['run']>().toEqualTypeOf<FormulaRun>();
   }));
 });

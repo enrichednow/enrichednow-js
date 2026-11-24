@@ -1,4 +1,13 @@
-import { DEFAULT_POLL_INTERVAL, DEFAULT_RUN_TIMEOUT, sleep } from '../internal';
+import {
+  DEFAULT_POLL_INTERVAL,
+  DEFAULT_RUN_TIMEOUT,
+  EXPORT_ACCEPT,
+  EXPORT_FORMATS,
+  EXPORT_PAGE,
+  heldTimeout,
+  sleep,
+  withoutHeader,
+} from '../internal';
 import type { EnrichedNow, RequestOptions } from '../client';
 import { RunTimeoutError } from '../errors';
 import { Page, PagePromise, RecordsPage } from '../pagination';
@@ -6,7 +15,6 @@ import type {
   FailedRunStatus,
   JSONObject,
   RecordExportParams,
-  RecordFormat,
   RecordList,
   RecordListParams,
   RecordsExport,
@@ -17,23 +25,11 @@ import type {
   TerminalRunStatus,
 } from '../types';
 
-/** Above `wait`, how much longer the request itself may take, in milliseconds. */
-const WAIT_MARGIN = 30_000;
-/** Records a page when a whole run is exported: the API's largest page. */
-const EXPORT_PAGE = 1000;
-const FORMATS: readonly RecordFormat[] = ['csv', 'ndjson'];
-const ACCEPT: Record<RecordFormat, string> = { csv: 'text/csv', ndjson: 'application/x-ndjson' };
 const decoder = new TextDecoder();
 
 export interface RunGetOptions extends RequestOptions {
   /** Seconds the request stays open for the run to end, 0 to 300. Default 0: the run as it is now. */
   wait?: number | undefined;
-}
-
-/** A CSV page after the first, without the header row every page starts with (the columns are the same). */
-function withoutHeader(body: Uint8Array): Uint8Array {
-  const end = body.indexOf(0x0a);
-  return end < 0 ? new Uint8Array(0) : body.subarray(end + 1);
 }
 
 const TERMINAL: ReadonlySet<RunStatus> = new Set(['ok', 'partial', 'failed', 'unsupported', 'cancelled']);
@@ -67,7 +63,7 @@ export class Runs {
       path: `/v1/runs/${encodeURIComponent(runId)}`,
       query: { wait },
       ...request,
-      timeout: request.timeout ?? (wait ? Math.max(this.client.timeout, wait * 1000 + WAIT_MARGIN) : undefined),
+      timeout: request.timeout ?? (wait ? heldTimeout(this.client.timeout, wait) : undefined),
     });
   }
 
@@ -159,13 +155,13 @@ export class Runs {
    */
   async export(runId: string, params: RecordExportParams, options?: RequestOptions): Promise<RecordsExport> {
     const { format, limit, cursor } = params;
-    if (!FORMATS.includes(format)) throw new TypeError(`format must be one of ${FORMATS.join(', ')}; for JSON use runs.records`);
+    if (!EXPORT_FORMATS.includes(format)) throw new TypeError(`format must be one of ${EXPORT_FORMATS.join(', ')}; for JSON use runs.records`);
     const answer = await this.client.requestBytes({
       method: 'GET',
       path: `/v1/runs/${encodeURIComponent(runId)}/records`,
       query: { format, limit, cursor },
       ...options,
-      headers: { accept: ACCEPT[format], ...options?.headers },
+      headers: { accept: EXPORT_ACCEPT[format], ...options?.headers },
     });
     return {
       format,

@@ -1,8 +1,6 @@
 import type { EnrichedNow, RequestOptions } from '../client';
+import { heldTimeout, newIdempotencyKey } from '../internal';
 import type { JSONObject, Run, Scraper, ScraperDetail, ScraperList } from '../types';
-
-/** Above `wait`, how much longer the request itself may take, in milliseconds. */
-const WAIT_MARGIN = 30_000;
 
 export interface RunStartOptions extends RequestOptions {
   /**
@@ -36,15 +34,6 @@ export interface RunStartOptions extends RequestOptions {
 export function unitCost(scraper: Pick<Scraper, 'billing_unit' | 'units_per_request' | 'units_per_record'>): number {
   const cost = scraper.billing_unit === 'record' ? scraper.units_per_record : scraper.units_per_request;
   return cost ?? 1;
-}
-
-/** A key of our own for one call: a UUID where the runtime makes one, else random hex of the same length. */
-function newIdempotencyKey(): string {
-  const made = globalThis.crypto?.randomUUID?.();
-  if (made) return made;
-  let hex = '';
-  for (let i = 0; i < 32; i++) hex += Math.floor(Math.random() * 16).toString(16);
-  return hex;
 }
 
 export class Scrapers {
@@ -86,7 +75,7 @@ export class Scrapers {
       ...request,
       headers: { ...request.headers, 'Idempotency-Key': idempotencyKey ?? newIdempotencyKey() },
       // The request must outlast the time the API is asked to hold it open.
-      timeout: request.timeout ?? Math.max(this.client.timeout, (wait ?? 0) * 1000 + WAIT_MARGIN),
+      timeout: request.timeout ?? heldTimeout(this.client.timeout, wait),
     });
   }
 }
